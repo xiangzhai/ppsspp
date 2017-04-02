@@ -41,6 +41,7 @@
 #include "ext/native/gfx/GLStateCache.h"
 #include "GPU/GLES/ShaderManagerGLES.h"
 #include "GPU/GLES/DrawEngineGLES.h"
+#include "GPU/Common/ShaderUniforms.h"
 #include "FramebufferManagerGLES.h"
 
 Shader::Shader(const ShaderID &id, const char *code, uint32_t glShaderType, bool useHWTransform, uint32_t attrMask, uint64_t uniformMask)
@@ -220,6 +221,7 @@ LinkedShader::LinkedShader(VShaderID VSID, Shader *vs, FShaderID FSID, Shader *f
 	u_uvscaleoffset = glGetUniformLocation(program, "u_uvscaleoffset");
 	u_texclamp = glGetUniformLocation(program, "u_texclamp");
 	u_texclampoff = glGetUniformLocation(program, "u_texclampoff");
+	u_guardband = glGetUniformLocation(program, "u_guardband");
 
 	for (int i = 0; i < 4; i++) {
 		char temp[64];
@@ -556,6 +558,13 @@ void LinkedShader::UpdateUniforms(u32 vertType, const VShaderID &vsid) {
 	if (dirty & DIRTY_TEXMATRIX) {
 		SetMatrix4x3(u_texmtx, gstate.tgenMatrix);
 	}
+
+	if (dirty & DIRTY_GUARDBAND) {
+		float gb[4];
+		ComputeGuardband(gb, 0.0f);
+		SetFloatUniform4(u_guardband, gb);
+	}
+
 	if ((dirty & DIRTY_DEPTHRANGE) && u_depthRange != -1) {
 		// Since depth is [-1, 1] mapping to [minz, maxz], this is easyish.
 		float vpZScale = gstate.getViewportZScale();

@@ -20,6 +20,7 @@
 #endif
 
 #include "base/logging.h"
+#include "base/stringutil.h"
 #include "math/lin/matrix4x4.h"
 #include "math/math_util.h"
 #include "math/dataconv.h"
@@ -63,7 +64,7 @@ VulkanFragmentShader::VulkanFragmentShader(VulkanContext *vulkan, FShaderID id, 
 #ifdef SHADERLOG
 		OutputDebugStringA("Messages:\n");
 		OutputDebugStringA(errorMessage.c_str());
-		OutputDebugStringA(code);
+		OutputDebugStringA(LineNumberString(code).c_str());
 #endif
 		Reporting::ReportMessage("Vulkan error in shader compilation: info: %s / code: %s", errorMessage.c_str(), code);
 	} else {

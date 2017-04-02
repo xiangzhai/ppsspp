@@ -9,7 +9,7 @@
 enum : uint64_t {
 	DIRTY_BASE_UNIFORMS =
 	DIRTY_WORLDMATRIX | DIRTY_PROJTHROUGHMATRIX | DIRTY_VIEWMATRIX | DIRTY_TEXMATRIX | DIRTY_ALPHACOLORREF |
-	DIRTY_PROJMATRIX | DIRTY_FOGCOLOR | DIRTY_FOGCOEF | DIRTY_TEXENV | DIRTY_STENCILREPLACEVALUE |
+	DIRTY_PROJMATRIX | DIRTY_FOGCOLOR | DIRTY_FOGCOEF | DIRTY_TEXENV | DIRTY_STENCILREPLACEVALUE | DIRTY_GUARDBAND |
 	DIRTY_ALPHACOLORMASK | DIRTY_SHADERBLEND | DIRTY_UVSCALEOFFSET | DIRTY_TEXCLAMP | DIRTY_DEPTHRANGE | DIRTY_MATAMBIENTALPHA |
 	DIRTY_BEZIERSPLINE,
 	DIRTY_LIGHT_UNIFORMS =
@@ -31,6 +31,7 @@ struct UB_VS_FS_Base {
 	float fogCoef[2];	float stencil; float pad0;
 	float matAmbient[4];
 	int spline_count_u; int spline_count_v; int spline_type_u; int spline_type_v;
+	float guardband[4];
 	// Fragment data
 	float fogColor[4];
 	float texEnvColor[4];
@@ -57,7 +58,9 @@ R"(  mat4 proj_mtx;
   int spline_count_v;
   int spline_type_u;
   int spline_type_v;
-  vec3 fogcolor; float nanValue;
+  vec4 guardband;
+  // Fragment
+  vec3 fogcolor;
   vec3 texenv;
   ivec4 alphacolorref;
   ivec4 alphacolormask;
@@ -83,7 +86,9 @@ R"(  float4x4 u_proj;
   int u_spline_count_v;
   int u_spline_type_u;
   int u_spline_type_v;
-  float3 u_fogcolor; float nanValue;
+  float4 u_guardband;
+  // Fragment
+  float3 u_fogcolor;
   float3 u_texenv;
   uint4 u_alphacolorref;
   uint4 u_alphacolormask;
@@ -183,3 +188,5 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 void LightUpdateUniforms(UB_VS_Lights *ub, uint64_t dirtyUniforms);
 void BoneUpdateUniforms(UB_VS_Bones *ub, uint64_t dirtyUniforms);
 
+// Shared helper functions
+void ComputeGuardband(float gb[4], float zmin);
