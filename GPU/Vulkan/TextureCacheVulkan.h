@@ -154,6 +154,8 @@ private:
 	DrawEngineVulkan *drawEngine_;
 	Vulkan2D *vulkan2D_;
 
+	VkShaderModule uploadCS_ = VK_NULL_HANDLE;
+
 	// Bound state to emulate an API similar to the others
 	VkImageView imageView_ = VK_NULL_HANDLE;
 	VkSampler curSampler_ = VK_NULL_HANDLE;
