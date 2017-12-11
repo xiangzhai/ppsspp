@@ -68,8 +68,7 @@ static const VkComponentMapping VULKAN_1555_SWIZZLE = { VK_COMPONENT_SWIZZLE_B, 
 static const VkComponentMapping VULKAN_565_SWIZZLE = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A };
 static const VkComponentMapping VULKAN_8888_SWIZZLE = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A };
 
-
-const char *uploadShader = R"(
+const char *copyShader = R"(
 #version 450
 #extension GL_ARB_separate_shader_objects : enable
 
@@ -77,11 +76,13 @@ const char *uploadShader = R"(
 #define WORKGROUP_SIZE 16
 layout (local_size_x = WORKGROUP_SIZE, local_size_y = WORKGROUP_SIZE, local_size_z = 1) in;
 
-layout(std430, binding = 0) buffer Buf {
-	uint pixel[];
-} buf;
+layout(std430, binding = 1) buffer Buf1 {
+	uint data[];
+} buf1;
 
-uniform layout(binding = 1, rgba8) writeonly image2D img;
+layout(std430, binding = 2) buffer Buf2 {
+	uint data[];
+} buf2;
 
 layout(push_constant) uniform Params {
 	int width;
@@ -100,7 +101,44 @@ void main() {
 	// Note that if the pixels are packed, we can do multiple stores
 	// and only launch this compute shader for every N pixels,
 	// by slicing the width in half and multiplying x by 2, for example.
-	uint color = buf.pixel[y * params.width + x];
+	uint color = buf1.data[y * params.width + x];
+	buf2.data[y * params.width + x] = color;
+}
+
+)";
+
+const char *uploadShader = R"(
+#version 450
+#extension GL_ARB_separate_shader_objects : enable
+
+// No idea what's optimal here...
+#define WORKGROUP_SIZE 16
+layout (local_size_x = WORKGROUP_SIZE, local_size_y = WORKGROUP_SIZE, local_size_z = 1) in;
+
+uniform layout(binding = 0, rgba8) writeonly image2D img;
+
+layout(std430, binding = 1) buffer Buf {
+	uint data[];
+} buf;
+
+layout(push_constant) uniform Params {
+	int width;
+	int height;
+} params;
+
+void main() {
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	// Kill off any out-of-image threads to avoid stray writes.
+	// Should only happen on the tiniest mipmaps as PSP textures are power-of-2,
+	// and we use a 16x16 workgroup size.
+	if (x >= params.width || gl_GlobalInvocationID.y >= params.height)
+    return;
+
+	// Note that if the pixels are packed, we can do multiple stores
+	// and only launch this compute shader for every N pixels,
+	// by slicing the width in half and multiplying x by 2, for example.
+	uint color = buf.data[y * params.width + x];
 	// Unpack the color (we could look it up in a CLUT here if we wanted...)
 	// It's a bit silly that we need to unpack to float and then have imageStore repack,
 	// but the alternative is to store to a buffer, and then launch a vkCmdCopyBufferToImage instead.
@@ -192,7 +230,7 @@ TextureCacheVulkan::TextureCacheVulkan(Draw::DrawContext *draw, VulkanContext *v
 	: TextureCacheCommon(draw),
 		vulkan_(vulkan),
 		samplerCache_(vulkan),
-		upload_(vulkan) {
+		computeShaderManager_(vulkan) {
 	timesInvalidatedAllThisFrame_ = 0;
 	DeviceRestore(vulkan, draw);
 	SetupTextureDecoder();
@@ -230,7 +268,9 @@ void TextureCacheVulkan::DeviceLost() {
 	vulkan_->Delete().QueueDeleteSampler(samplerNearest_);
 
 	vulkan_->Delete().QueueDeleteShaderModule(uploadCS_);
-	upload_.DeviceLost();
+	vulkan_->Delete().QueueDeleteShaderModule(copyCS_);
+
+	computeShaderManager_.DeviceLost();
 
 	nextTexture_ = nullptr;
 }
@@ -256,8 +296,10 @@ void TextureCacheVulkan::DeviceRestore(VulkanContext *vulkan, Draw::DrawContext 
 	std::string error;
 	uploadCS_ = CompileShaderModule(vulkan_, VK_SHADER_STAGE_COMPUTE_BIT, uploadShader, &error);
 	_dbg_assert_msg_(G3D, uploadCS_ != VK_NULL_HANDLE, "failed to compile upload shader");
+	copyCS_ = CompileShaderModule(vulkan_, VK_SHADER_STAGE_COMPUTE_BIT, copyShader, &error);
+	_dbg_assert_msg_(G3D, copyCS_!= VK_NULL_HANDLE, "failed to compile copy shader");
 
-	upload_.DeviceRestore(vulkan);
+	computeShaderManager_.DeviceRestore(vulkan);
 }
 
 void TextureCacheVulkan::ReleaseTexture(TexCacheEntry *entry, bool delete_them) {
@@ -325,12 +367,12 @@ void TextureCacheVulkan::StartFrame() {
 	}
 
 	allocator_->Begin();
-	upload_.BeginFrame();
+	computeShaderManager_.BeginFrame();
 }
 
 void TextureCacheVulkan::EndFrame() {
 	allocator_->End();
-	upload_.EndFrame();
+	computeShaderManager_.EndFrame();
 
 	if (texelsScaledThisFrame_) {
 		// INFO_LOG(G3D, "Scaled %i texels", texelsScaledThisFrame_);
@@ -622,6 +664,7 @@ void TextureCacheVulkan::BuildTexture(TexCacheEntry *const entry, bool replaceIm
 	}
 
 	bool computeUpload = false;
+	bool computeCopy = false;
 
 	{
 		delete entry->vkTex;
@@ -654,7 +697,9 @@ void TextureCacheVulkan::BuildTexture(TexCacheEntry *const entry, bool replaceIm
 
 		// Compute experiment
 		if (actualFmt == VULKAN_8888_FORMAT) {
-			computeUpload = true;
+			// Enable the experiment you want.
+			computeCopy = true;
+			// computeUpload = true;
 		}
 
 		if (computeUpload) {
@@ -735,13 +780,29 @@ void TextureCacheVulkan::BuildTexture(TexCacheEntry *const entry, bool replaceIm
 					if (computeUpload) {
 						// This format can be used with storage images.
 						VkImageView view = entry->vkTex->texture_->CreateViewForMip(i);
-						VkDescriptorSet descSet = upload_.GetDescriptorSet(texBuf, bufferOffset, size, view);
+						VkDescriptorSet descSet = computeShaderManager_.GetDescriptorSet(view, texBuf, bufferOffset, size);
 						struct Params { int x; int y; } params{ mipWidth, mipHeight };
-						vkCmdBindPipeline(cmdInit, VK_PIPELINE_BIND_POINT_COMPUTE, upload_.GetPipeline(uploadCS_));
-						vkCmdBindDescriptorSets(cmdInit, VK_PIPELINE_BIND_POINT_COMPUTE, upload_.GetPipelineLayout(), 0, 1, &descSet, 0, nullptr);
-						vkCmdPushConstants(cmdInit, upload_.GetPipelineLayout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+						vkCmdBindPipeline(cmdInit, VK_PIPELINE_BIND_POINT_COMPUTE, computeShaderManager_.GetPipeline(uploadCS_));
+						vkCmdBindDescriptorSets(cmdInit, VK_PIPELINE_BIND_POINT_COMPUTE, computeShaderManager_.GetPipelineLayout(), 0, 1, &descSet, 0, nullptr);
+						vkCmdPushConstants(cmdInit, computeShaderManager_.GetPipelineLayout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
 						vkCmdDispatch(cmdInit, (mipWidth + 15) / 16, (mipHeight + 15) / 16, 1);
 						vulkan_->Delete().QueueDeleteImageView(view);
+					} else if (computeCopy) {
+						// Simple test of using a "copy shader" before the upload. This one could unswizzle or whatever
+						// and will work for any texture format including 16-bit as long as the shader is written to pack it into int32 size bits
+						// which is the smallest possible write.
+						VkBuffer localBuf;
+						uint32_t localOffset;
+						uint32_t localSize = size;
+						localOffset = drawEngine_->GetPushBufferLocal()->Allocate(localSize, &localBuf);
+
+						VkDescriptorSet descSet = computeShaderManager_.GetDescriptorSet(VK_NULL_HANDLE, texBuf, bufferOffset, size, localBuf, localOffset, localSize);
+						vkCmdBindPipeline(cmdInit, VK_PIPELINE_BIND_POINT_COMPUTE, computeShaderManager_.GetPipeline(copyCS_));
+						vkCmdBindDescriptorSets(cmdInit, VK_PIPELINE_BIND_POINT_COMPUTE, computeShaderManager_.GetPipelineLayout(), 0, 1, &descSet, 0, nullptr);
+						struct Params { int x; int y; } params{ mipWidth, mipHeight };
+						vkCmdPushConstants(cmdInit, computeShaderManager_.GetPipelineLayout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
+						vkCmdDispatch(cmdInit, (mipWidth + 15) / 16, (mipHeight + 15) / 16, 1);
+						entry->vkTex->texture_->UploadMip(cmdInit, i, mipWidth, mipHeight, localBuf, localOffset, stride / bpp);
 					} else {
 						entry->vkTex->texture_->UploadMip(cmdInit, i, mipWidth, mipHeight, texBuf, bufferOffset, stride / bpp);
 					}

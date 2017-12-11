@@ -178,6 +178,11 @@ public:
 		return frame_[vulkan_->GetCurFrame()].pushUBO;
 	}
 
+	// Only use Allocate on this one.
+	VulkanPushBuffer *GetPushBufferLocal() {
+		return frame_[vulkan_->GetCurFrame()].pushLocal;
+	}
+
 	const DrawEngineVulkanStats &GetStats() const {
 		return stats_;
 	}
@@ -235,6 +240,10 @@ private:
 		VulkanPushBuffer *pushUBO;
 		VulkanPushBuffer *pushVertex;
 		VulkanPushBuffer *pushIndex;
+
+		// Special push buffer in GPU local memory, for texture data conversion and similar tasks.
+		VulkanPushBuffer *pushLocal;
+
 		// We do rolling allocation and reset instead of caching across frames. That we might do later.
 		DenseHashMap<DescriptorSetKey, VkDescriptorSet, (VkDescriptorSet)VK_NULL_HANDLE> descSets;
 

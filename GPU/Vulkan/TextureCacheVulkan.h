@@ -136,7 +136,7 @@ private:
 	VulkanDeviceAllocator *allocator_ = nullptr;
 	VulkanPushBuffer *push_ = nullptr;
 
-	VulkanComputeUploader upload_;
+	VulkanComputeShaderManager computeShaderManager_;
 
 	SamplerCache samplerCache_;
 
@@ -155,6 +155,7 @@ private:
 	Vulkan2D *vulkan2D_;
 
 	VkShaderModule uploadCS_ = VK_NULL_HANDLE;
+	VkShaderModule copyCS_ = VK_NULL_HANDLE;
 
 	// Bound state to emulate an API similar to the others
 	VkImageView imageView_ = VK_NULL_HANDLE;
