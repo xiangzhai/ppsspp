@@ -147,7 +147,8 @@ std::vector<std::string> SamplerCache::DebugGetSamplerIDs() const {
 TextureCacheVulkan::TextureCacheVulkan(Draw::DrawContext *draw, VulkanContext *vulkan)
 	: TextureCacheCommon(draw),
 		vulkan_(vulkan),
-		samplerCache_(vulkan) {
+		samplerCache_(vulkan),
+		upload_(vulkan) {
 	timesInvalidatedAllThisFrame_ = 0;
 	DeviceRestore(vulkan, draw);
 	SetupTextureDecoder();
@@ -184,6 +185,8 @@ void TextureCacheVulkan::DeviceLost() {
 	samplerCache_.DeviceLost();
 	vulkan_->Delete().QueueDeleteSampler(samplerNearest_);
 
+	upload_.DeviceLost();
+
 	nextTexture_ = nullptr;
 }
 
@@ -204,6 +207,8 @@ void TextureCacheVulkan::DeviceRestore(VulkanContext *vulkan, Draw::DrawContext 
 	samp.minFilter = VK_FILTER_NEAREST;
 	samp.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
 	vkCreateSampler(vulkan_->GetDevice(), &samp, nullptr, &samplerNearest_);
+
+	upload_.DeviceRestore(vulkan);
 }
 
 void TextureCacheVulkan::ReleaseTexture(TexCacheEntry *entry, bool delete_them) {
