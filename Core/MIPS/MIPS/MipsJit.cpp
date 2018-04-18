@@ -83,7 +83,7 @@ void MipsJit::FlushPrefixV()
 void MipsJit::ClearCache()
 {
 	blocks.Clear();
-	ClearCodeSpace();
+	ClearCodeSpace(0);
 	//GenerateFixedCode();
 }
 
@@ -322,6 +322,22 @@ void MipsJit::WriteSyscallExit()
 	//WriteDownCount();
 	B((const void *)dispatcherCheckCoreState);
 }
+
+MIPSOpcode MipsJit::GetOriginalOp(MIPSOpcode op) {
+        JitBlockCache *bc = GetBlockCache();
+        int block_num = bc->GetBlockNumberFromEmuHackOp(op, true);
+        if (block_num >= 0) {
+                return bc->GetOriginalFirstOp(block_num);
+        } else {
+                return op;
+        }
+}
+
+// FIXME: unimplemented
+void MipsJit::LinkBlock(u8 *exitPoint, const u8 *checkedEntry) {}
+
+// FIXME: unimplemented
+void MipsJit::UnlinkBlock(u8 *checkedEntry, u32 originalAddress) {}
 
 #define _RS ((op>>21) & 0x1F)
 #define _RT ((op>>16) & 0x1F)

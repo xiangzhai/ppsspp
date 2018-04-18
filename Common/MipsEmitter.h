@@ -23,6 +23,7 @@
 
 #include "Common.h"
 #include "MsgHandler.h"
+#include "CodeBlock.h"
 
 namespace MIPSGen {
 
@@ -73,12 +74,13 @@ public:
 	MIPSEmitter() : code_(0), lastCacheFlushEnd_(0) {
 	}
 	MIPSEmitter(u8 *code_ptr) : code_(code_ptr), lastCacheFlushEnd_(code_ptr) {
-		SetCodePtr(code_ptr);
+		SetCodePointer(code_ptr);
 	}
 	virtual ~MIPSEmitter() {
 	}
 
-	void SetCodePtr(u8 *ptr);
+	void SetCodePointer(u8 *ptr);
+	const u8 *GetCodePointer() const;
 	void ReserveCodeSpace(u32 bytes);
 	const u8 *AlignCode16();
 	const u8 *AlignCodePage();
@@ -271,6 +273,11 @@ private:
 // Everything that needs to generate machine code should inherit from this.
 // You get memory management for free, plus, you can use all the LUI etc functions without
 // having to prefix them with gen-> or something similar.
+class MIPSCodeBlock : public CodeBlock<MIPSEmitter> {
+private:
+        void PoisonMemory(int offset) override;
+};
+#if 0
 class MIPSCodeBlock : public MIPSEmitter {
 public:
 	MIPSCodeBlock() : region(nullptr), region_size(0) {
@@ -315,5 +322,6 @@ protected:
 	u8 *region;
 	size_t region_size;
 };
+#endif
 
 };

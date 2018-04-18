@@ -140,6 +140,15 @@ public:
 
 	void EatPrefix() override { js.EatPrefix(); }
 
+	const u8 *GetDispatcher() const override {
+		return dispatcher; 
+	}
+
+	MIPSOpcode GetOriginalOp(MIPSOpcode op) override;
+
+	void LinkBlock(u8 *exitPoint, const u8 *checkedEntry) override;
+	void UnlinkBlock(u8 *checkedEntry, u32 originalAddress) override;
+
 private:
 	void GenerateFixedCode();
 	void FlushAll();
@@ -185,8 +194,8 @@ public:
 	const u8 *breakpointBailout;
 };
 
-typedef void (MipsJit::*MIPSCompileFunc)(MIPSOpcode opcode);
-typedef int (MipsJit::*MIPSReplaceFunc)();
+//typedef void (MipsJit::*MIPSCompileFunc)(MIPSOpcode opcode);
+//typedef int (MipsJit::*MIPSReplaceFunc)();
 
 }	// namespace MIPSComp
 

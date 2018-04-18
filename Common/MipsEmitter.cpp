@@ -29,9 +29,13 @@
 #include "CPUDetect.h"
 
 namespace MIPSGen {
-void MIPSEmitter::SetCodePtr(u8 *ptr) {
+void MIPSEmitter::SetCodePointer(u8 *ptr) {
 	code_ = ptr;
 	lastCacheFlushEnd_ = ptr;
+}
+
+const u8 *MIPSEmitter::GetCodePointer() const {
+        return code_;
 }
 
 void MIPSEmitter::ReserveCodeSpace(u32 bytes) {
@@ -468,6 +472,10 @@ void MIPSEmitter::MOVI2R(MIPSReg reg, u32 imm) {
 	}
 }
 
+// FIXME: unimplemented
+void MIPSCodeBlock::PoisonMemory(int offset) {}
+
+#if 0
 void MIPSCodeBlock::AllocCodeSpace(int size) {
 	region_size = size;
 	region = (u8 *)AllocateExecutableMemory(region_size);
@@ -490,5 +498,6 @@ void MIPSCodeBlock::FreeCodeSpace() {
 	region = NULL;
 	region_size = 0;
 }
+#endif
 
 }

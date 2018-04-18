@@ -16,7 +16,7 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #ifndef USING_QT_UI
-#include <libpng17/png.h>
+#include <libpng16/png.h>
 #endif
 
 #include <algorithm>

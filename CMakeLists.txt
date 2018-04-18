@@ -1,5 +1,5 @@
 # vim:noexpandtab:
-cmake_minimum_required(VERSION 3.6)
+cmake_minimum_required(VERSION 3.0)
 project(PPSSPP)
 
 #This is supposed to work but doesn't!
@@ -10,6 +10,9 @@ endif()
 
 enable_language(ASM)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake/Modules)
+
+add_definitions(-std=c++11)
+
 
 add_definitions(-D__STDC_CONSTANT_MACROS)
 
@@ -435,7 +438,7 @@ add_subdirectory(ext)
 include_directories(Common)
 setup_target_project(Common Common)
 
-target_link_libraries(Common Ext::Snappy)
+target_link_libraries(Common snappy)
 
 if(WIN32)
 	include_directories(dx9sdk/Include)
@@ -639,9 +642,9 @@ else()
 	set(LIBZIP_LIBRARY libzip)
 endif()
 
-# FindPNG does a few things we don't want. So do it ourselves. Fixed to libpng17
-find_path(PNG_PNG_INCLUDE_DIR NAMES "libpng17/png.h")
-find_library(PNG_LIBRARY NAMES png17 libpng17)
+# FindPNG does a few things we don't want. So do it ourselves. Fixed to libpng16
+find_path(PNG_PNG_INCLUDE_DIR NAMES "libpng16/png.h")
+find_library(PNG_LIBRARY NAMES png16 libpng16)
 find_package(PackageHandleStandardArgs)
 find_package_handle_standard_args(PNG REQUIRED_VARS PNG_LIBRARY PNG_PNG_INCLUDE_DIR)
 if (PNG_FOUND)
@@ -654,7 +657,7 @@ else()
             ext/native/ext/libpng17/arm/filter_neon_intrinsics.c
         )
 	endif()
-	add_library(png17 STATIC
+	add_library(png16 STATIC
 		ext/native/ext/libpng17/pngconf.h
 		ext/native/ext/libpng17/pngdebug.h
 		ext/native/ext/libpng17/png.c
@@ -678,7 +681,7 @@ else()
 		ext/native/ext/libpng17/pngwtran.c
 		ext/native/ext/libpng17/pngwutil.c
 		${PNG_ARM_INCLUDES} )
-	set(PNG_LIBRARY png17)
+	set(PNG_LIBRARY png16)
 	include_directories(ext/native/ext)
 endif()
 
@@ -1064,7 +1067,7 @@ endif()
 
 target_link_libraries(native ${LIBZIP_LIBRARY} ${PNG_LIBRARY} ${ZLIB_LIBRARY} rg_etc1 vjson udis86 ${RT_LIB} ${nativeExtraLibs} ${ATOMIC_LIB})
 if(TARGET Ext::GLEW)
-  target_link_libraries(native Ext::GLEW)
+  target_link_libraries(native GLEW)
 endif()
 
 if(ANDROID)
@@ -1194,7 +1197,7 @@ list(APPEND CoreExtra
 list(APPEND CoreExtra
 	Core/MIPS/MIPS/MipsJit.cpp
 	Core/MIPS/MIPS/MipsJit.h
-	GPU/Common/VertexDecoderFake.cpp
+	GPU/Common/VertexDecoderMips.cpp
 )
 
 if (NOT MOBILE_DEVICE)
