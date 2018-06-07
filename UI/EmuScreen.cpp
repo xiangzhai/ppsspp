@@ -399,15 +399,15 @@ void EmuScreen::sendMessage(const char *message, const char *value) {
 		// In case we need to position touch controls differently.
 		RecreateViews();
 	} else if (!strcmp(message, "control mapping") && screenManager()->topScreen() == this) {
-		UpdateUIState(UISTATE_MENU);
+		UpdateUIState(UISTATE_PAUSEMENU);
 		releaseButtons();
 		screenManager()->push(new ControlMappingScreen());
 	} else if (!strcmp(message, "display layout editor") && screenManager()->topScreen() == this) {
-		UpdateUIState(UISTATE_MENU);
+		UpdateUIState(UISTATE_PAUSEMENU);
 		releaseButtons();
 		screenManager()->push(new DisplayLayoutScreen());
 	} else if (!strcmp(message, "settings") && screenManager()->topScreen() == this) {
-		UpdateUIState(UISTATE_MENU);
+		UpdateUIState(UISTATE_PAUSEMENU);
 		releaseButtons();
 		screenManager()->push(new GameSettingsScreen(gamePath_));
 	} else if (!strcmp(message, "gpu dump next frame")) {
@@ -856,13 +856,16 @@ public:
 
 		// PIC1 is the loading image, so let's only draw if it's available.
 		if (ginfo && ginfo->pic1.texture) {
-			dc.GetDrawContext()->BindTexture(0, ginfo->pic1.texture->GetTexture());
+			Draw::Texture *texture = ginfo->pic1.texture->GetTexture();
+			if (texture) {
+				dc.GetDrawContext()->BindTexture(0, texture);
 
-			double loadTime = ginfo->pic1.timeLoaded;
-			uint32_t color = alphaMul(color_, ease((time_now_d() - loadTime) * 3));
-			dc.Draw()->DrawTexRect(dc.GetBounds(), 0, 0, 1, 1, color);
-			dc.Flush();
-			dc.RebindTexture();
+				double loadTime = ginfo->pic1.timeLoaded;
+				uint32_t color = alphaMul(color_, ease((time_now_d() - loadTime) * 3));
+				dc.Draw()->DrawTexRect(dc.GetBounds(), 0, 0, 1, 1, color);
+				dc.Flush();
+				dc.RebindTexture();
+			}
 		}
 	}
 
@@ -897,6 +900,8 @@ void EmuScreen::CreateViews() {
 
 	GameInfoBGView *loadingBG = root_->Add(new GameInfoBGView(gamePath_, new AnchorLayoutParams(FILL_PARENT, FILL_PARENT)));
 	TextView *loadingTextView = root_->Add(new TextView(sc->T(PSP_GetLoading()), new AnchorLayoutParams(bounds.centerX(), NONE, NONE, 40, true)));
+	loadingTextView_ = loadingTextView;
+
 	static const int symbols[4] = {
 		I_CROSS,
 		I_CIRCLE,
@@ -905,10 +910,17 @@ void EmuScreen::CreateViews() {
 	};
 	Spinner *loadingSpinner = root_->Add(new Spinner(symbols, ARRAY_SIZE(symbols), new AnchorLayoutParams(NONE, NONE, 45, 45, true)));
 	loadingSpinner_ = loadingSpinner;
-	loadingTextView->SetShadow(true);
-	loadingTextView_ = loadingTextView;
 
-	loadingViewColor_ = loadingTextView->AddTween(new CallbackColorTween(0x00FFFFFF, 0x00FFFFFF, 0.2f, &bezierEaseInOut));
+	loadingBG->SetTag("LoadingBG");
+	loadingTextView->SetTag("LoadingText");
+	loadingSpinner->SetTag("LoadingSpinner");
+
+	// Don't really need this, and it creates a lot of strings to translate...
+	// Maybe just show "Loading game..." only?
+	loadingTextView->SetVisibility(V_GONE);
+	loadingTextView->SetShadow(true);
+
+	loadingViewColor_ = loadingSpinner->AddTween(new CallbackColorTween(0x00FFFFFF, 0x00FFFFFF, 0.2f, &bezierEaseInOut));
 	loadingViewColor_->SetCallback([loadingBG, loadingTextView, loadingSpinner](View *v, uint32_t c) {
 		loadingBG->SetColor(c & 0xFFC0C0C0);
 		loadingTextView->SetTextColor(c);
@@ -917,15 +929,18 @@ void EmuScreen::CreateViews() {
 	loadingViewColor_->Persist();
 
 	// We start invisible here, in case of recreated views.
-	loadingViewVisible_ = loadingTextView->AddTween(new VisibilityTween(UI::V_INVISIBLE, UI::V_INVISIBLE, 0.2f, &bezierEaseInOut));
+	loadingViewVisible_ = loadingSpinner->AddTween(new VisibilityTween(UI::V_INVISIBLE, UI::V_INVISIBLE, 0.2f, &bezierEaseInOut));
 	loadingViewVisible_->Persist();
-	loadingViewVisible_->Finish.Add([loadingBG](EventParams &p) {
+	loadingViewVisible_->Finish.Add([loadingBG, loadingSpinner](EventParams &p) {
 		loadingBG->SetVisibility(p.v->GetVisibility());
 
 		// If we just became invisible, flush BGs since we don't need them anymore.
 		// Saves some VRAM for the game, but don't do it before we fade out...
 		if (p.v->GetVisibility() == V_INVISIBLE) {
 			g_gameInfoCache->FlushBGs();
+			// And we can go away too.  This means the tween will never run again.
+			loadingBG->SetVisibility(V_GONE);
+			loadingSpinner->SetVisibility(V_GONE);
 		}
 		return EVENT_DONE;
 	});
@@ -1101,6 +1116,11 @@ void EmuScreen::preRender() {
 	using namespace Draw;
 	DrawContext *draw = screenManager()->getDrawContext();
 	draw->BeginFrame();
+	// Let's be consistent for the entire frame.  We skip the UI texture if we don't need it.
+	hasVisibleUI_ = hasVisibleUI();
+	if (hasVisibleUI_) {
+		screenManager()->getUIContext()->BeginFrame();
+	}
 	// Here we do NOT bind the backbuffer or clear the screen, unless non-buffered.
 	// The emuscreen is different than the others - we really want to allow the game to render to framebuffers
 	// before we ever bind the backbuffer for rendering. On mobile GPUs, switching back and forth between render
@@ -1142,6 +1162,8 @@ void EmuScreen::render() {
 	using namespace Draw;
 
 	DrawContext *thin3d = screenManager()->getDrawContext();
+	if (!thin3d)
+		return;  // shouldn't really happen but I've seen a suspicious stack trace..
 
 	if (invalid_) {
 		// Loading, or after shutdown?
@@ -1199,9 +1221,7 @@ void EmuScreen::render() {
 	if (invalid_)
 		return;
 
-	const bool hasVisibleUI = !osm.IsEmpty() || saveStatePreview_->GetVisibility() != UI::V_GONE || g_Config.bShowTouchControls || loadingTextView_->GetVisibility() == UI::V_VISIBLE;
-	const bool showDebugUI = g_Config.bShowDebugStats || g_Config.bShowDeveloperMenu || g_Config.bShowAudioDebug || g_Config.bShowFrameProfiler;
-	if (hasVisibleUI || showDebugUI || g_Config.iShowFPSCounter != 0) {
+	if (hasVisibleUI_) {
 		renderUI();
 	}
 
@@ -1221,6 +1241,20 @@ void EmuScreen::render() {
 #endif
 	}
 	*/
+}
+
+bool EmuScreen::hasVisibleUI() {
+	// Regular but uncommon UI.
+	if (saveStatePreview_->GetVisibility() != UI::V_GONE || loadingSpinner_->GetVisibility() == UI::V_VISIBLE)
+		return true;
+	if (!osm.IsEmpty() || g_Config.bShowTouchControls || g_Config.iShowFPSCounter != 0)
+		return true;
+
+	// Debug UI.
+	if (g_Config.bShowDebugStats || g_Config.bShowDeveloperMenu || g_Config.bShowAudioDebug || g_Config.bShowFrameProfiler)
+		return true;
+
+	return false;
 }
 
 void EmuScreen::renderUI() {

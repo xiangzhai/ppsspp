@@ -353,8 +353,6 @@ void VulkanQueueRunner::RunSteps(VkCommandBuffer cmd, std::vector<VKRStep *> &st
 	//  * Create copies of render target that are rendered to multiple times and textured from in sequence, and push those render passes
 	//    as early as possible in the frame (Wipeout billboards).
 
-	// Push down empty "Clear/Store" renderpasses, and merge them with the first "Load/Store" to the same framebuffer.
-	// Actually let's just bother with the first one for now. This affects Wipeout Pure.
 	for (int j = 0; j < (int)steps.size() - 1; j++) {
 		if (steps[j]->stepType == VKRStepType::RENDER &&
 			steps[j]->render.finalColorLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
@@ -362,8 +360,11 @@ void VulkanQueueRunner::RunSteps(VkCommandBuffer cmd, std::vector<VKRStep *> &st
 			steps[j]->render.finalColorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		}
 
+		// Push down empty "Clear/Store" renderpasses, and merge them with the first "Load/Store" to the same framebuffer.
+		// Actually let's just bother with the first one for now. This affects Wipeout Pure.
 		if (steps.size() > 1 && steps[j]->stepType == VKRStepType::RENDER &&
 			steps[j]->render.numDraws == 0 &&
+			steps[j]->render.numReads == 0 &&
 			steps[j]->render.color == VKRRenderPassAction::CLEAR &&
 			steps[j]->render.stencil == VKRRenderPassAction::CLEAR &&
 			steps[j]->render.depth == VKRRenderPassAction::CLEAR) {
@@ -391,6 +392,7 @@ void VulkanQueueRunner::RunSteps(VkCommandBuffer cmd, std::vector<VKRStep *> &st
 					steps[i]->copy.src == steps[j]->render.framebuffer) {
 					// Can't eliminate the clear if a game copies from it before it's
 					// rendered to. However this should be rare.
+					// TODO: This should never happen when we check numReads now.
 					break;
 				}
 			}
@@ -611,6 +613,10 @@ void VulkanQueueRunner::LogRenderPass(const VKRStep &pass) {
 	ILOG("RenderPass Begin(%x)", fb);
 	for (auto &cmd : pass.commands) {
 		switch (cmd.cmd) {
+		case VKRRenderCommand::REMOVED:
+			ILOG("  (Removed)");
+			break;
+
 		case VKRRenderCommand::BIND_PIPELINE:
 			ILOG("  BindPipeline(%x)", (int)(intptr_t)cmd.pipeline.pipeline);
 			break;
@@ -733,6 +739,9 @@ void VulkanQueueRunner::PerformRenderPass(const VKRStep &step, VkCommandBuffer c
 
 	for (const auto &c : commands) {
 		switch (c.cmd) {
+		case VKRRenderCommand::REMOVED:
+			break;
+
 		case VKRRenderCommand::BIND_PIPELINE:
 			if (c.pipeline.pipeline != lastPipeline) {
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, c.pipeline.pipeline);
@@ -841,7 +850,7 @@ void VulkanQueueRunner::PerformBindFramebufferAsRenderTarget(const VKRStep &step
 		// See pull request #10723.
 		bool maliBugWorkaround = step.render.numDraws == 0 &&
 			step.render.color == VKRRenderPassAction::CLEAR &&
-			vulkan_->GetPhysicalDeviceProperties().driverVersion == 0xaa9c4b29;
+			vulkan_->GetPhysicalDeviceProperties(vulkan_->GetCurrentPhysicalDevice()).driverVersion == 0xaa9c4b29;
 		if (maliBugWorkaround) {
 			TransitionImageLayout2(cmd, step.render.framebuffer->color.image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT,
 				fb->color.layout, VK_IMAGE_LAYOUT_GENERAL,
@@ -1173,7 +1182,7 @@ void VulkanQueueRunner::PerformReadback(const VKRStep &step, VkCommandBuffer cmd
 	if (step.readback.src == nullptr) {
 		// We only take screenshots after the main render pass (anything else would be stupid) so we need to transition out of PRESENT,
 		// and then back into it.
-		TransitionImageLayout2(cmd, backbufferImage_, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+		TransitionImageLayout2(cmd, backbufferImage_, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT,
 			VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 			0, VK_ACCESS_TRANSFER_READ_BIT);
@@ -1210,7 +1219,7 @@ void VulkanQueueRunner::PerformReadback(const VKRStep &step, VkCommandBuffer cmd
 	if (step.readback.src == nullptr) {
 		// We only take screenshots after the main render pass (anything else would be stupid) so we need to transition out of PRESENT,
 		// and then back into it.
-		TransitionImageLayout2(cmd, backbufferImage_, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+		TransitionImageLayout2(cmd, backbufferImage_, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT,
 			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
 			VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
 			VK_ACCESS_TRANSFER_READ_BIT, 0);

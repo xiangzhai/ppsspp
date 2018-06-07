@@ -27,7 +27,7 @@ extern const char *PPSSPP_GIT_VERSION;
 
 const int PSP_MODEL_FAT = 0;
 const int PSP_MODEL_SLIM = 1;
-const int PSP_DEFAULT_FIRMWARE = 150;
+const int PSP_DEFAULT_FIRMWARE = 660;
 static const s8 VOLUME_OFF = 0;
 static const s8 VOLUME_MAX = 10;
 
@@ -153,6 +153,12 @@ public:
 
 	// GFX
 	int iGPUBackend;
+	// We have separate device parameters for each backend so it doesn't get erased if you switch backends.
+	// If not set, will use the "best" device.
+	std::string sVulkanDevice;
+#ifdef _WIN32
+	std::string sD3D11Device;
+#endif
 	bool bSoftwareRendering;
 	bool bHardwareTransform; // only used in the GLES backend
 	bool bSoftwareSkinning;  // may speed up some games

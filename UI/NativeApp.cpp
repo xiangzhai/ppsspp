@@ -276,7 +276,7 @@ void NativeGetAppInfo(std::string *app_dir_name, std::string *app_nice_name, boo
 }
 
 #if defined(_WIN32) && !PPSSPP_PLATFORM(UWP)
-bool CheckFontIsUsable(const wchar_t *fontFace) {
+static bool CheckFontIsUsable(const wchar_t *fontFace) {
 	wchar_t actualFontFace[1024] = { 0 };
 
 	HFONT f = CreateFont(0, 0, 0, 0, FW_LIGHT, 0, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, PROOF_QUALITY, VARIABLE_PITCH, fontFace);
@@ -297,6 +297,49 @@ bool CheckFontIsUsable(const wchar_t *fontFace) {
 	return false;
 }
 #endif
+
+static void PostLoadConfig() {
+	// On Windows, we deal with currentDirectory in InitSysDirectories().
+#ifndef _WIN32
+	if (g_Config.currentDirectory.empty()) {
+#if defined(__ANDROID__)
+		g_Config.currentDirectory = g_Config.externalDirectory;
+#elif defined(IOS)
+		g_Config.currentDirectory = g_Config.internalDataDirectory;
+#else
+		if (getenv("HOME") != nullptr)
+			g_Config.currentDirectory = getenv("HOME");
+		else
+			g_Config.currentDirectory = "./";
+#endif
+	}
+#endif
+
+	// Allow the lang directory to be overridden for testing purposes (e.g. Android, where it's hard to
+	// test new languages without recompiling the entire app, which is a hassle).
+	const std::string langOverridePath = g_Config.memStickDirectory + "PSP/SYSTEM/lang/";
+
+	// If we run into the unlikely case that "lang" is actually a file, just use the built-in translations.
+	if (!File::Exists(langOverridePath) || !File::IsDirectory(langOverridePath))
+		i18nrepo.LoadIni(g_Config.sLanguageIni);
+	else
+		i18nrepo.LoadIni(g_Config.sLanguageIni, langOverridePath);
+}
+
+void CreateDirectoriesAndroid() {
+	// On Android, create a PSP directory tree in the external_dir,
+	// to hopefully reduce confusion a bit.
+	ILOG("Creating %s", (g_Config.memStickDirectory + "PSP").c_str());
+	File::CreateDir(g_Config.memStickDirectory + "PSP");
+	File::CreateDir(g_Config.memStickDirectory + "PSP/SAVEDATA");
+	File::CreateDir(g_Config.memStickDirectory + "PSP/PPSSPP_STATE");
+	File::CreateDir(g_Config.memStickDirectory + "PSP/GAME");
+	File::CreateDir(g_Config.memStickDirectory + "PSP/SYSTEM");
+
+	// Avoid media scanners in PPSSPP_STATE and SAVEDATA directories
+	File::CreateEmptyFile(g_Config.memStickDirectory + "PSP/PPSSPP_STATE/.nomedia");
+	File::CreateEmptyFile(g_Config.memStickDirectory + "PSP/SAVEDATA/.nomedia");
+}
 
 void NativeInit(int argc, const char *argv[], const char *savegame_dir, const char *external_dir, const char *cache_dir, bool fs) {
 	net::Init();  // This needs to happen before we load the config. So on Windows we also run it in Main. It's fine to call multiple times.
@@ -336,8 +379,10 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 	}
 #endif
 
-#if defined(__ANDROID__)
 	g_Config.internalDataDirectory = savegame_dir;
+	g_Config.externalDirectory = external_dir;
+
+#if defined(__ANDROID__)
 	// Maybe there should be an option to use internal memory instead, but I think
 	// that for most people, using external memory (SDCard/USB Storage) makes the
 	// most sense.
@@ -375,21 +420,12 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 	// Note that if we don't have storage permission here, loading the config will
 	// fail and it will be set to the default. Later, we load again when we get permission.
 	g_Config.Load();
-	g_Config.externalDirectory = external_dir;
 #endif
 	LogManager *logman = LogManager::GetInstance();
 
 #ifdef __ANDROID__
-	// TODO: This is also done elsewhere. Remove?
-	// On Android, create a PSP directory tree in the external_dir,
-	// to hopefully reduce confusion a bit.
-	ILOG("Creating %s", (g_Config.memStickDirectory + "PSP").c_str());
-	File::CreateDir((g_Config.memStickDirectory + "PSP").c_str());
-	File::CreateDir((g_Config.memStickDirectory + "PSP/SAVEDATA").c_str());
-	File::CreateDir((g_Config.memStickDirectory + "PSP/GAME").c_str());
+	CreateDirectoriesAndroid();
 #endif
-
-
 
 	const char *fileToLog = 0;
 	const char *stateToLoad = 0;
@@ -471,12 +507,22 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 					std::unique_ptr<FileLoader> fileLoader(ConstructFileLoader(boot_filename));
 					if (!fileLoader->Exists()) {
 						fprintf(stderr, "File not found: %s\n", boot_filename.c_str());
+#ifdef _WIN32
+						// Ignore and proceed.
+#else
+						// Bail.
 						exit(1);
+#endif
 					}
 				}
 			} else {
 				fprintf(stderr, "Can only boot one file");
+#ifdef _WIN32
+				// Ignore and proceed.
+#else
+				// Bail.
 				exit(1);
+#endif
 			}
 		}
 	}
@@ -484,20 +530,7 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 	if (fileToLog)
 		LogManager::GetInstance()->ChangeFileLog(fileToLog);
 
-#ifndef _WIN32
-	if (g_Config.currentDirectory == "") {
-#if defined(__ANDROID__)
-		g_Config.currentDirectory = external_dir;
-#elif defined(IOS) || defined(_WIN32)
-		g_Config.currentDirectory = savegame_dir;
-#else
-		if (getenv("HOME") != NULL)
-			g_Config.currentDirectory = getenv("HOME");
-		else
-			g_Config.currentDirectory = "./";
-#endif
-	}
-#endif
+	PostLoadConfig();
 
 	// Hard reset the logs. TODO: Get rid of this and read from config.
 #ifndef _WIN32
@@ -514,16 +547,6 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 	logger = new AndroidLogger();
 	logman->AddListener(logger);
 #endif
-
-	// Allow the lang directory to be overridden for testing purposes (e.g. Android, where it's hard to 
-	// test new languages without recompiling the entire app, which is a hassle).
-	const std::string langOverridePath = g_Config.memStickDirectory + "PSP/SYSTEM/lang/";
-
-	// If we run into the unlikely case that "lang" is actually a file, just use the built-in translations.
-	if (!File::Exists(langOverridePath) || !File::IsDirectory(langOverridePath))
-		i18nrepo.LoadIni(g_Config.sLanguageIni);
-	else
-		i18nrepo.LoadIni(g_Config.sLanguageIni, langOverridePath);
 
 	if (System_GetPropertyBool(SYSPROP_SUPPORTS_PERMISSIONS)) {
 		if (System_GetPermissionStatus(SYSTEM_PERMISSION_STORAGE) != PERMISSION_STATUS_GRANTED) {
@@ -667,6 +690,9 @@ bool NativeInitGraphics(GraphicsContext *graphicsContext) {
 
 	colorPipeline = g_draw->CreateGraphicsPipeline(colorDesc);
 	texColorPipeline = g_draw->CreateGraphicsPipeline(texColorDesc);
+
+	_assert_(colorPipeline);
+	_assert_(texColorPipeline);
 
 	// Release these now, reference counting should ensure that they get completely released
 	// once we delete both pipelines.
@@ -947,14 +973,17 @@ void HandleGlobalMessage(const std::string &msg, const std::string &value) {
 			osm.Show(sy->T("WARNING: Battery save mode is on"), 2.0f, 0xFFFFFF, -1, true, "core_powerSaving");
 #endif
 		}
-
 		Core_SetPowerSaving(value != "false");
 	}
 	if (msg == "permission_granted" && value == "storage") {
+#ifdef __ANDROID__
+		CreateDirectoriesAndroid();
+#endif
 		// We must have failed to load the config before, so load it now to avoid overwriting the old config
 		// with a freshly generated one.
 		ILOG("Reloading config after storage permission grant.");
 		g_Config.Load();
+		PostLoadConfig();
 	}
 }
 
@@ -978,6 +1007,11 @@ void NativeUpdate() {
 }
 
 bool NativeIsAtTopLevel() {
+	// This might need some synchronization?
+	if (!screenManager) {
+		ELOG("No screen manager active");
+		return false;
+	}
 	Screen *currentScreen = screenManager->topScreen();
 	if (currentScreen) {
 		bool top = currentScreen->isTopLevel();
@@ -1128,7 +1162,8 @@ bool NativeIsRestarting() {
 }
 
 void NativeShutdown() {
-	screenManager->shutdown();
+	if (screenManager)
+		screenManager->shutdown();
 	delete screenManager;
 	screenManager = nullptr;
 

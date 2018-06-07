@@ -180,7 +180,10 @@ public:
 
 	void SetLineWidth(float lineWidth);
 	void SetDepalTexture(VkImageView depal) {
-		boundDepal_ = depal;
+		if (boundDepal_ != depal) {
+			boundDepal_ = depal;
+			gstate_c.Dirty(DIRTY_FRAGMENTSHADER_STATE);
+		}
 	}
 
 private:
@@ -264,8 +267,7 @@ private:
 	VkImageView imageView = VK_NULL_HANDLE;
 	VkSampler sampler = VK_NULL_HANDLE;
 
-	// Null texture
-	VulkanTexture *nullTexture_ = nullptr;
+	// For null texture
 	VkSampler nullSampler_ = VK_NULL_HANDLE;
 
 	DrawEngineVulkanStats stats_;
