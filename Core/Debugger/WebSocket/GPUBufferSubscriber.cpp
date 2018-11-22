@@ -17,7 +17,7 @@
 
 #include <algorithm>
 #ifndef USING_QT_UI
-#include <libpng17/png.h>
+#include <libpng16/png.h>
 #include <zlib.h>
 #endif
 #include "data/base64.h"

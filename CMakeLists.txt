@@ -66,6 +66,7 @@ include(ccache)
 
 # Remove soon?
 set(USE_FFMPEG ON)
+set(USE_SYSTEM_FFMPEG ON)
 
 # the libraries in the ffmpeg/ directory are not compatible with mingw
 if(MINGW AND NOT DEFINED USE_SYSTEM_FFMPEG)
@@ -1094,11 +1095,7 @@ endif()
 
 target_link_libraries(native ${LIBZIP_LIBRARY} ${PNG_LIBRARY} ${ZLIB_LIBRARY} rg_etc1 gason udis86 ${RT_LIB} ${nativeExtraLibs} ${ATOMIC_LIB})
 if(TARGET Ext::GLEW)
-<<<<<<< HEAD
-  target_link_libraries(native GLEW)
-=======
 	target_link_libraries(native Ext::GLEW)
->>>>>>> upstream/master
 endif()
 
 if(ANDROID)

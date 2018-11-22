@@ -62,17 +62,17 @@ namespace MIPSComp {
 		}
 	}
 
-	JitInterface *CreateNativeJit(MIPSState *mips) {
+	JitInterface *CreateNativeJit(MIPSState *Mips) {
 #if PPSSPP_ARCH(ARM)
-		return new MIPSComp::ArmJit(mips);
+		return new MIPSComp::ArmJit(Mips);
 #elif PPSSPP_ARCH(ARM64)
-		return new MIPSComp::Arm64Jit(mips);
+		return new MIPSComp::Arm64Jit(Mips);
 #elif PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
-		return new MIPSComp::Jit(mips);
+		return new MIPSComp::Jit(Mips);
 #elif PPSSPP_ARCH(MIPS)
-		return new MIPSComp::MipsJit(mips);
+		return new MIPSComp::MipsJit(Mips);
 #else
-		return new MIPSComp::FakeJit(mips);
+		return new MIPSComp::FakeJit(Mips);
 #endif
 	}
 

@@ -35,7 +35,7 @@ namespace MIPSComp
 class MipsJit : public MIPSGen::MIPSCodeBlock, public JitInterface, public MIPSFrontendInterface
 {
 public:
-	MipsJit(MIPSState *mips);
+	MipsJit(MIPSState *Mips);
 
 	void DoState(PointerWrap &p) override;
 

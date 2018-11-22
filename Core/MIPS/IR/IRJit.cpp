@@ -38,7 +38,7 @@
 
 namespace MIPSComp {
 
-IRJit::IRJit(MIPSState *mips) : frontend_(mips->HasDefaultPrefix()), mips_(mips) {
+IRJit::IRJit(MIPSState *Mips) : frontend_(Mips->HasDefaultPrefix()), mips_(Mips) {
 	u32 size = 128 * 1024;
 	// blTrampolines_ = kernelMemory.Alloc(size, true, "trampoline");
 	InitIR();

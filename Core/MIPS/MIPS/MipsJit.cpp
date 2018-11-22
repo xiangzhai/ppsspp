@@ -42,7 +42,7 @@ void DisassembleMIPS(const u8 *data, int size) {
 namespace MIPSComp
 {
 
-MipsJit::MipsJit(MIPSState *mips) : blocks(mips, this), mips_(mips)
+MipsJit::MipsJit(MIPSState *Mips) : blocks(Mips, this), mips_(Mips)
 { 
 	logBlocks = 0;
 	dontLogBlocks = 0;

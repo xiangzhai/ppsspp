@@ -79,7 +79,7 @@ namespace MIPSComp {
 
 class ArmRegCacheFPU {
 public:
-	ArmRegCacheFPU(MIPSState *mips, MIPSComp::JitState *js, MIPSComp::JitOptions *jo);
+	ArmRegCacheFPU(MIPSState *Mips, MIPSComp::JitState *js, MIPSComp::JitOptions *jo);
 	~ArmRegCacheFPU() {}
 
 	void Init(ArmGen::ARMXEmitter *emitter);
