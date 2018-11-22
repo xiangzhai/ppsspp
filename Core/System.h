@@ -58,23 +58,32 @@ void ResetUIState();
 void UpdateUIState(GlobalUIState newState);
 GlobalUIState GetUIState();
 
-void SetGPUBackend(GPUBackend type);
+void SetGPUBackend(GPUBackend type, const std::string &device = "");
 GPUBackend GetGPUBackend();
+std::string GetGPUBackendDevice();
 
 bool PSP_Init(const CoreParameter &coreParam, std::string *error_string);
 bool PSP_InitStart(const CoreParameter &coreParam, std::string *error_string);
 bool PSP_InitUpdate(std::string *error_string);
 bool PSP_IsIniting();
 bool PSP_IsInited();
+bool PSP_IsQuitting();
 void PSP_Shutdown();
 
 void PSP_BeginHostFrame();
 void PSP_EndHostFrame();
+void PSP_RunLoopWhileState();
 void PSP_RunLoopUntil(u64 globalticks);
 void PSP_RunLoopFor(int cycles);
 
 void PSP_SetLoading(const std::string &reason);
 std::string PSP_GetLoading();
+
+// Used to wait for background loading thread.
+struct PSP_LoadingLock {
+	PSP_LoadingLock();
+	~PSP_LoadingLock();
+};
 
 // Call before PSP_BeginHostFrame() in order to not miss any GPU stats.
 void Core_UpdateDebugStats(bool collectStats);

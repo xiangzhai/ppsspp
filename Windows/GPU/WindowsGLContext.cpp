@@ -26,6 +26,7 @@
 #include "GL/gl.h"
 #include "GL/wglew.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/Core.h"
 #include "util/text/utf8.h"
 #include "i18n/i18n.h"
@@ -34,6 +35,9 @@
 
 #include "Windows/W32Util/Misc.h"
 #include "Windows/GPU/WindowsGLContext.h"
+
+// Currently, just compile time for debugging.  May be NVIDIA only.
+static const int simulateGLES = false;
 
 void WindowsGLContext::SwapBuffers() {
 	// We no longer call RenderManager::Swap here, it's handled by the render thread, which
@@ -266,6 +270,7 @@ bool WindowsGLContext::InitFromRenderThread(std::string *error_message) {
 			std::wstring whichD3D9 = ConvertUTF8ToWString(err->T("D3D9or11", d3d9Or11));
 			bool d3d9 = IDYES == MessageBox(hWnd_, whichD3D9.c_str(), title.c_str(), MB_YESNO);
 			g_Config.iGPUBackend = d3d9 ? (int)GPUBackend::DIRECT3D9 : (int)GPUBackend::DIRECT3D11;
+			g_Config.sFailedGPUBackends.clear();
 			g_Config.Save();
 
 			W32Util::ExitAndRestart();
@@ -291,6 +296,21 @@ bool WindowsGLContext::InitFromRenderThread(std::string *error_message) {
 	// Alright, now for the modernity. First try a 4.4, then 4.3, context, if that fails try 3.3.
 	// I can't seem to find a way that lets you simply request the newest version available.
 	if (wglewIsSupported("WGL_ARB_create_context") == 1) {
+		if (simulateGLES) {
+			const static int simulateVersions[][2] = { {3, 2}, {3, 1}, {3, 0}, {2, 0} };
+			for (auto ver : simulateVersions) {
+				const int attribsES[] = {
+					WGL_CONTEXT_MAJOR_VERSION_ARB, ver[0],
+					WGL_CONTEXT_MINOR_VERSION_ARB, ver[1],
+					WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_ES2_PROFILE_BIT_EXT,
+					0
+				};
+				m_hrc = wglCreateContextAttribsARB(hDC, 0, attribsES);
+				if (m_hrc)
+					break;
+			}
+		}
+
 		for (int tryCore = 1; tryCore >= 0 && m_hrc == nullptr; --tryCore) {
 			SetGLCoreContext(tryCore == 1);
 
@@ -385,7 +405,7 @@ bool WindowsGLContext::InitFromRenderThread(std::string *error_message) {
 	renderManager_ = (GLRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
 	SetGPUBackend(GPUBackend::OPENGL);
 	bool success = draw_->CreatePresets();  // if we get this far, there will always be a GLSL compiler capable of compiling these.
-	assert(success);
+	_assert_msg_(G3D, success, "Failed to compile preset shaders");
 	renderManager_->SetSwapFunction([&]() {::SwapBuffers(hDC); });
 	if (wglSwapIntervalEXT) {
 		// glew loads wglSwapIntervalEXT if available

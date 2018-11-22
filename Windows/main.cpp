@@ -36,9 +36,10 @@
 #include "net/resolve.h"
 
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/SaveState.h"
 #include "Windows/EmuThread.h"
-#include "Windows/DSoundStream.h"
+#include "Windows/WindowsAudio.h"
 #include "ext/disarm.h"
 
 #include "Common/LogManager.h"
@@ -457,9 +458,6 @@ int WINAPI WinMain(HINSTANCE _hInstance, HINSTANCE hPrevInstance, LPSTR szCmdLin
 				debugLogLevel = true;
 				break;
 			}
-
-			if (wideArgs[i] == L"--fullscreen")
-				g_Config.bFullScreen = true;
 
 			if (wideArgs[i] == L"--windowed")
 				g_Config.bFullScreen = false;

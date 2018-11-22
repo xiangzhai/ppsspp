@@ -20,7 +20,6 @@
 
 #include "Common/MemoryUtil.h"
 #include "Core/MemMap.h"
-#include "Core/Host.h"
 #include "Core/System.h"
 #include "Core/Reporting.h"
 #include "Core/Config.h"
@@ -36,6 +35,7 @@
 #include "GPU/Common/TransformCommon.h"
 #include "GPU/Common/VertexDecoderCommon.h"
 #include "GPU/Common/SoftwareTransformCommon.h"
+#include "GPU/Debugger/Debugger.h"
 #include "GPU/Directx9/TextureCacheDX9.h"
 #include "GPU/Directx9/DrawEngineDX9.h"
 #include "GPU/Directx9/ShaderManagerDX9.h"
@@ -95,13 +95,13 @@ DrawEngineDX9::DrawEngineDX9(Draw::DrawContext *draw) : vai_(256), vertexDeclMap
 	// All this is a LOT of memory, need to see if we can cut down somehow.
 	decoded = (u8 *)AllocateMemoryPages(DECODED_VERTEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 	decIndex = (u16 *)AllocateMemoryPages(DECODED_INDEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
-	splineBuffer = (u8 *)AllocateMemoryPages(SPLINE_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 
 	indexGen.Setup(decIndex);
 
 	InitDeviceObjects();
 
-	tessDataTransfer = new TessellationDataTransferDX9();
+	tessDataTransferDX9 = new TessellationDataTransferDX9();
+	tessDataTransfer = tessDataTransferDX9;
 
 	device_->CreateVertexDeclaration(TransformedVertexElements, &transformedVertexDecl_);
 }
@@ -114,14 +114,13 @@ DrawEngineDX9::~DrawEngineDX9() {
 	DestroyDeviceObjects();
 	FreeMemoryPages(decoded, DECODED_VERTEX_BUFFER_SIZE);
 	FreeMemoryPages(decIndex, DECODED_INDEX_BUFFER_SIZE);
-	FreeMemoryPages(splineBuffer, SPLINE_BUFFER_SIZE);
 	vertexDeclMap_.Iterate([&](const uint32_t &key, IDirect3DVertexDeclaration9 *decl) {
 		if (decl) {
 			decl->Release();
 		}
 	});
 	vertexDeclMap_.Clear();
-	delete tessDataTransfer;
+	delete tessDataTransferDX9;
 }
 
 void DrawEngineDX9::InitDeviceObjects() {
@@ -621,11 +620,11 @@ rotateVBO:
 	gstate_c.vertBounds.maxU = 0;
 	gstate_c.vertBounds.maxV = 0;
 
-	host->GPUNotifyDraw();
+	GPUDebug::NotifyDraw();
 }
 
-void DrawEngineDX9::TessellationDataTransferDX9::SendDataToShader(const float * pos, const float * tex, const float * col, int size, bool hasColor, bool hasTexCoords)
-{
+void TessellationDataTransferDX9::SendDataToShader(const SimpleVertex *const *points, int size_u, int size_v, u32 vertType, const Spline::Weight2D &weights) {
+	// TODO
 }
 
 }  // namespace

@@ -15,14 +15,15 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <cmath>
+#include "math/math_util.h"
 #include "Common/MemoryUtil.h"
-#include "Core/Host.h"
 #include "Core/Config.h"
 #include "GPU/GPUState.h"
 #include "GPU/Common/DrawEngineCommon.h"
 #include "GPU/Common/VertexDecoderCommon.h"
 #include "GPU/Common/SplineCommon.h"
-
+#include "GPU/Debugger/Debugger.h"
 #include "GPU/Software/TransformUnit.h"
 #include "GPU/Software/Clipper.h"
 #include "GPU/Software/Lighting.h"
@@ -41,13 +42,11 @@ SoftwareDrawEngine::SoftwareDrawEngine() {
 	// All this is a LOT of memory, need to see if we can cut down somehow.  Used for splines.
 	decoded = (u8 *)AllocateMemoryPages(DECODED_VERTEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 	decIndex = (u16 *)AllocateMemoryPages(DECODED_INDEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
-	splineBuffer = (u8 *)AllocateMemoryPages(SPLINE_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 }
 
 SoftwareDrawEngine::~SoftwareDrawEngine() {
 	FreeMemoryPages(decoded, DECODED_VERTEX_BUFFER_SIZE);
 	FreeMemoryPages(decIndex, DECODED_INDEX_BUFFER_SIZE);
-	FreeMemoryPages(splineBuffer, SPLINE_BUFFER_SIZE);
 }
 
 void SoftwareDrawEngine::DispatchFlush() {
@@ -104,16 +103,23 @@ static inline ScreenCoords ClipToScreenInternal(const ClipCoords& coords, bool *
 	float y = coords.y * yScale / coords.w + yCenter;
 	float z = coords.z * zScale / coords.w + zCenter;
 
+	// Account for rounding for X and Y.
+	// TODO: Validate actual rounding range.
+	const float SCREEN_BOUND = 4095.0f + (15.5f / 16.0f);
+	const float DEPTH_BOUND = 65535.5f;
+
 	// This matches hardware tests - depth is clamped when this flag is on.
-	if (gstate.isClippingEnabled()) {
+	if (gstate.isDepthClampEnabled()) {
+		// Note: if the depth is clamped, the outside_range_flag should NOT be set, even for x and y.
 		if (z < 0.f)
 			z = 0.f;
-		if (z > 65535.f)
-			z = 65535.f;
-	}
-
-	if (outside_range_flag && (x > 4095.9375f || y > 4095.9375f || x < 0 || y < 0 || z < 0 || z > 65535.f))
+		else if (z > 65535.0f)
+			z = 65535.0f;
+		else if (outside_range_flag && (x >= SCREEN_BOUND || y >= SCREEN_BOUND || x < 0 || y < 0))
+			*outside_range_flag = true;
+	} else if (outside_range_flag && (x > SCREEN_BOUND || y >= SCREEN_BOUND || x < 0 || y < 0 || z < 0 || z >= DEPTH_BOUND)) {
 		*outside_range_flag = true;
+	}
 
 	// 16 = 0xFFFF / 4095.9375
 	// Round up at 0.625 to the nearest subpixel.
@@ -210,8 +216,17 @@ VertexData TransformUnit::ReadVertex(VertexReader& vreader)
 		ModelCoords viewpos = TransformUnit::WorldToView(vertex.worldpos);
 		vertex.clippos = ClipCoords(TransformUnit::ViewToClip(viewpos));
 		if (gstate.isFogEnabled()) {
-			// TODO: Validate inf/nan.
-			vertex.fogdepth = (viewpos.z + getFloat24(gstate.fog1)) * getFloat24(gstate.fog2);
+			float fog_end = getFloat24(gstate.fog1);
+			float fog_slope = getFloat24(gstate.fog2);
+			// Same fixup as in ShaderManagerGLES.cpp
+			if (my_isnanorinf(fog_end)) {
+				// Not really sure what a sensible value might be, but let's try 64k.
+				fog_end = std::signbit(fog_end) ? -65535.0f : 65535.0f;
+			}
+			if (my_isnanorinf(fog_slope)) {
+				fog_slope = std::signbit(fog_slope) ? -65535.0f : 65535.0f;
+			}
+			vertex.fogdepth = (viewpos.z + fog_end) * fog_slope;
 		} else {
 			vertex.fogdepth = 1.0f;
 		}
@@ -263,7 +278,7 @@ void TransformUnit::SubmitPrimitive(void* vertices, void* indices, GEPrimitiveTy
 
 	u16 index_lower_bound = 0;
 	u16 index_upper_bound = vertex_count - 1;
-	IndexConverter idxConv(vertex_type, indices);
+	IndexConverter ConvertIndex(vertex_type, indices);
 
 	if (indices)
 		GetIndexBounds(indices, vertex_count, vertex_type, &index_lower_bound, &index_upper_bound);
@@ -304,7 +319,7 @@ void TransformUnit::SubmitPrimitive(void* vertices, void* indices, GEPrimitiveTy
 		{
 			for (int vtx = 0; vtx < vertex_count; ++vtx) {
 				if (indices) {
-					vreader.Goto(idxConv.convert(vtx) - index_lower_bound);
+					vreader.Goto(ConvertIndex(vtx) - index_lower_bound);
 				} else {
 					vreader.Goto(vtx);
 				}
@@ -363,7 +378,7 @@ void TransformUnit::SubmitPrimitive(void* vertices, void* indices, GEPrimitiveTy
 			int skip_count = data_index == 0 ? 1 : 0;
 			for (int vtx = 0; vtx < vertex_count; ++vtx) {
 				if (indices) {
-					vreader.Goto(idxConv.convert(vtx) - index_lower_bound);
+					vreader.Goto(ConvertIndex(vtx) - index_lower_bound);
 				} else {
 					vreader.Goto(vtx);
 				}
@@ -393,7 +408,7 @@ void TransformUnit::SubmitPrimitive(void* vertices, void* indices, GEPrimitiveTy
 
 			for (int vtx = 0; vtx < vertex_count; ++vtx) {
 				if (indices) {
-					vreader.Goto(idxConv.convert(vtx) - index_lower_bound);
+					vreader.Goto(ConvertIndex(vtx) - index_lower_bound);
 				} else {
 					vreader.Goto(vtx);
 				}
@@ -435,7 +450,7 @@ void TransformUnit::SubmitPrimitive(void* vertices, void* indices, GEPrimitiveTy
 			// Only read the central vertex if we're not continuing.
 			if (data_index == 0) {
 				if (indices) {
-					vreader.Goto(idxConv.convert(0) - index_lower_bound);
+					vreader.Goto(ConvertIndex(0) - index_lower_bound);
 				} else {
 					vreader.Goto(0);
 				}
@@ -446,7 +461,7 @@ void TransformUnit::SubmitPrimitive(void* vertices, void* indices, GEPrimitiveTy
 
 			for (int vtx = start_vtx; vtx < vertex_count; ++vtx) {
 				if (indices) {
-					vreader.Goto(idxConv.convert(vtx) - index_lower_bound);
+					vreader.Goto(ConvertIndex(vtx) - index_lower_bound);
 				} else {
 					vreader.Goto(vtx);
 				}
@@ -483,7 +498,7 @@ void TransformUnit::SubmitPrimitive(void* vertices, void* indices, GEPrimitiveTy
 		break;
 	}
 
-	host->GPUNotifyDraw();
+	GPUDebug::NotifyDraw();
 }
 
 // TODO: This probably is not the best interface.

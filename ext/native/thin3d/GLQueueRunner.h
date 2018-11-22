@@ -20,6 +20,7 @@ struct GLOffset2D {
 };
 
 enum class GLRAllocType {
+	NONE,
 	NEW,
 	ALIGNED,
 };
@@ -57,6 +58,7 @@ enum class GLRRenderCommand : uint8_t {
 	DRAW,
 	DRAW_INDEXED,
 	PUSH_CONSTANTS,
+	TEXTURE_SUBIMAGE,
 };
 
 // TODO: Bloated since the biggest struct decides the size. Will need something more efficient (separate structs with shared
@@ -138,6 +140,18 @@ struct GLRRenderData {
 			int slot;
 			GLRTexture *texture;
 		} texture;
+		struct {
+			GLRTexture *texture;
+			GLenum format;
+			GLenum type;
+			int level;
+			int x;
+			int y;
+			int width;
+			int height;
+			GLRAllocType allocType;
+			uint8_t *data;  // owned, delete[]-d
+		} texture_subimage;
 		struct {
 			int slot;
 			GLRFramebuffer *framebuffer;
@@ -322,9 +336,9 @@ class GLQueueRunner {
 public:
 	GLQueueRunner() {}
 
-	void RunInitSteps(const std::vector<GLRInitStep> &steps);
+	void RunInitSteps(const std::vector<GLRInitStep> &steps, bool skipGLCalls);
 
-	void RunSteps(const std::vector<GLRStep *> &steps);
+	void RunSteps(const std::vector<GLRStep *> &steps, bool skipGLCalls);
 	void LogSteps(const std::vector<GLRStep *> &steps);
 
 	void CreateDeviceObjects();

@@ -15,6 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <algorithm>
 #include "i18n/i18n.h"
 #include "gfx_es2/draw_buffer.h"
 #include "ui/view.h"
@@ -48,14 +49,42 @@ AsyncImageFileView::AsyncImageFileView(const std::string &filename, UI::ImageSiz
 
 AsyncImageFileView::~AsyncImageFileView() {}
 
-void AsyncImageFileView::GetContentDimensions(const UIContext &dc, float &w, float &h) const {
+static float DesiredSize(float sz, float contentSize, UI::MeasureSpec spec) {
+	float measured;
+	UI::MeasureBySpec(sz, contentSize, spec, &measured);
+	return measured;
+}
+
+void AsyncImageFileView::GetContentDimensionsBySpec(const UIContext &dc, UI::MeasureSpec horiz, UI::MeasureSpec vert, float &w, float &h) const {
 	if (texture_ && texture_->GetTexture()) {
 		float texw = (float)texture_->Width();
 		float texh = (float)texture_->Height();
+		float desiredW = DesiredSize(layoutParams_->width, w, horiz);
+		float desiredH = DesiredSize(layoutParams_->height, h, vert);
 		switch (sizeMode_) {
 		case UI::IS_FIXED:
 			w = fixedSizeW_;
 			h = fixedSizeH_;
+			break;
+		case UI::IS_KEEP_ASPECT:
+			w = texw;
+			h = texh;
+			if (desiredW != w || desiredH != h) {
+				float aspect = w / h;
+				// We need the other dimension based on the desired scale to find the best aspect.
+				float desiredWOther = DesiredSize(layoutParams_->height, h * (desiredW / w), vert);
+				float desiredHOther = DesiredSize(layoutParams_->width, w * (desiredH / h), horiz);
+
+				float diffW = fabsf(aspect - desiredW / desiredWOther);
+				float diffH = fabsf(aspect - desiredH / desiredHOther);
+				if (diffW < diffH) {
+					w = desiredW;
+					h = desiredWOther;
+				} else {
+					w = desiredHOther;
+					h = desiredH;
+				}
+			}
 			break;
 		case UI::IS_DEFAULT:
 		default:
@@ -138,12 +167,15 @@ public:
 	}
 
 protected:
-	virtual bool FillVertical() const override { return false; }
+	bool FillVertical() const override { return false; }
+	UI::Size PopupWidth() const override { return 500; }
 	bool ShowButtons() const override { return true; }
 
-	virtual void CreatePopupContents(UI::ViewGroup *parent) override {
-		// TODO: Find an appropriate size for the image view
-		parent->Add(new AsyncImageFileView(filename_, UI::IS_DEFAULT, NULL, new UI::LayoutParams(480, 272)))->SetCanBeFocused(false);
+	void CreatePopupContents(UI::ViewGroup *parent) override {
+		UI::LinearLayout *content = new UI::LinearLayout(UI::ORIENT_VERTICAL);
+		parent->Add(content);
+		UI::Margins contentMargins(10, 0);
+		content->Add(new AsyncImageFileView(filename_, UI::IS_KEEP_ASPECT, nullptr, new UI::LinearLayoutParams(480, 272, contentMargins)))->SetCanBeFocused(false);
 	}
 
 private:
@@ -238,9 +270,9 @@ void SaveSlotView::Draw(UIContext &dc) {
 	UI::LinearLayout::Draw(dc);
 }
 
-static void AfterSaveStateAction(bool status, const std::string &message, void *) {
+static void AfterSaveStateAction(SaveState::Status status, const std::string &message, void *) {
 	if (!message.empty()) {
-		osm.Show(message, 2.0);
+		osm.Show(message, status == SaveState::Status::SUCCESS ? 2.0 : 5.0);
 	}
 }
 
@@ -373,7 +405,7 @@ void GamePauseScreen::dialogFinished(const Screen *dialog, DialogResult dr) {
 		ScreenshotViewScreen *s = (ScreenshotViewScreen *)dialog;
 		int slot = s->GetSlot();
 		g_Config.iCurrentStateSlot = slot;
-		SaveState::LoadSlot(gamePath_, slot, SaveState::Callback(), 0);
+		SaveState::LoadSlot(gamePath_, slot, &AfterSaveStateAction);
 
 		finishNextFrame_ = true;
 	} else {

@@ -59,7 +59,9 @@ Request::~Request() {
 
 	CHECK(in_->Empty());
 	delete in_;
-	CHECK(out_->Empty());
+	if (!out_->Empty()) {
+		ELOG("Output not empty - connection abort?");
+	}
 	delete out_;
 }
 
@@ -87,8 +89,10 @@ void Request::WriteHttpResponseHeader(int status, int64_t size, const char *mime
 	net::OutputSink *buffer = Out();
 	buffer->Printf("HTTP/1.0 %03d %s\r\n", status, statusStr);
 	buffer->Push("Server: PPSSPPServer v0.1\r\n");
-	buffer->Printf("Content-Type: %s\r\n", mimeType ? mimeType : DEFAULT_MIME_TYPE);
-	buffer->Push("Connection: close\r\n");
+	if (!mimeType || strcmp(mimeType, "websocket") != 0) {
+		buffer->Printf("Content-Type: %s\r\n", mimeType ? mimeType : DEFAULT_MIME_TYPE);
+		buffer->Push("Connection: close\r\n");
+	}
 	if (size >= 0) {
 		buffer->Printf("Content-Length: %llu\r\n", size);
 	}
@@ -277,7 +281,7 @@ void Server::HandleConnection(int conn_fd) {
     WLOG("Bad request, ignoring.");
     return;
   }
-  HandleRequestDefault(request);
+  HandleRequest(request);
 
   // TODO: Way to mark the content body as read, read it here if never read.
   // This allows the handler to stream if need be.

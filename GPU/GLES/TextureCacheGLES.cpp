@@ -443,12 +443,10 @@ void TextureCacheGLES::ApplyTextureFramebuffer(TexCacheEntry *entry, VirtualFram
 	DepalShader *depal = nullptr;
 	uint32_t clutMode = gstate.clutformat & 0xFFFFFF;
 
-#if 0
-	bool useShaderDepal = gstate_c.Supports(GPU_SUPPORTS_GLSL_ES_300);
-#else
-	bool useShaderDepal = false;
-#endif
-
+	bool useShaderDepal = framebufferManager_->GetCurrentRenderVFB() != framebuffer && gstate_c.Supports(GPU_SUPPORTS_GLSL_ES_300);
+	if (!gstate_c.Supports(GPU_SUPPORTS_32BIT_INT_FSHADER)) {
+		useShaderDepal = false;
+	}
 	if ((entry->status & TexCacheEntry::STATUS_DEPALETTIZE) && !g_Config.bDisableSlowFramebufEffects) {
 		if (useShaderDepal) {
 			const GEPaletteFormat clutFormat = gstate.getClutPaletteFormat();
@@ -473,11 +471,12 @@ void TextureCacheGLES::ApplyTextureFramebuffer(TexCacheEntry *entry, VirtualFram
 		depal = depalShaderCache_->GetDepalettizeShader(clutMode, framebuffer->drawnFormat);
 	}
 	if (depal) {
+		shaderManager_->DirtyLastShader();
+
 		const GEPaletteFormat clutFormat = gstate.getClutPaletteFormat();
 		GLRTexture *clutTexture = depalShaderCache_->GetClutTexture(clutFormat, clutHash_, clutBuf_);
 		Draw::Framebuffer *depalFBO = framebufferManagerGL_->GetTempFBO(TempFBO::DEPAL, framebuffer->renderWidth, framebuffer->renderHeight, Draw::FBO_8888);
 		draw_->BindFramebufferAsRenderTarget(depalFBO, { Draw::RPAction::DONT_CARE, Draw::RPAction::DONT_CARE, Draw::RPAction::DONT_CARE });
-		shaderManager_->DirtyLastShader();
 
 		render_->SetScissor(GLRect2D{ 0, 0, (int)framebuffer->renderWidth, (int)framebuffer->renderHeight });
 		render_->SetViewport(GLRViewport{ 0.0f, 0.0f, (float)framebuffer->renderWidth, (float)framebuffer->renderHeight, 0.0f, 1.0f });
@@ -747,11 +746,8 @@ TexCacheEntry::TexStatus TextureCacheGLES::CheckAlpha(const uint8_t *pixelData, 
 void TextureCacheGLES::LoadTextureLevel(TexCacheEntry &entry, ReplacedTexture &replaced, int level, int scaleFactor, GLenum dstFmt) {
 	int w = gstate.getTextureWidth(level);
 	int h = gstate.getTextureHeight(level);
-	bool useUnpack = false;
 	uint8_t *pixelData;
-
-	// TODO: only do this once
-	u32 texByteAlign = 1;
+	int decPitch = 0;
 
 	gpuStats.numTexturesDecoded++;
 
@@ -759,13 +755,12 @@ void TextureCacheGLES::LoadTextureLevel(TexCacheEntry &entry, ReplacedTexture &r
 		PROFILE_THIS_SCOPE("replacetex");
 
 		int bpp = replaced.Format(level) == ReplacedTextureFormat::F_8888 ? 4 : 2;
-		uint8_t *rearrange = (uint8_t *)AllocateAlignedMemory(w * h * bpp, 16);
-		replaced.Load(level, rearrange, bpp * w);
+		decPitch = w * bpp;
+		uint8_t *rearrange = (uint8_t *)AllocateAlignedMemory(decPitch * h, 16);
+		replaced.Load(level, rearrange, decPitch);
 		pixelData = rearrange;
 
 		dstFmt = ToGLESFormat(replaced.Format(level));
-
-		texByteAlign = bpp;
 	} else {
 		PROFILE_THIS_SCOPE("decodetex");
 
@@ -774,14 +769,15 @@ void TextureCacheGLES::LoadTextureLevel(TexCacheEntry &entry, ReplacedTexture &r
 		int bufw = GetTextureBufw(level, texaddr, GETextureFormat(entry.format));
 
 		int pixelSize = dstFmt == GL_UNSIGNED_BYTE ? 4 : 2;
-		int decPitch = w * pixelSize;
+		// We leave GL_UNPACK_ALIGNMENT at 4, so this must be at least 4.
+		decPitch = std::max(w * pixelSize, 4);
 
 		pixelData = (uint8_t *)AllocateAlignedMemory(decPitch * h * pixelSize, 16);
 		DecodeTextureLevel(pixelData, decPitch, GETextureFormat(entry.format), clutformat, texaddr, level, bufw, true, false, false);
 
 		// We check before scaling since scaling shouldn't invent alpha from a full alpha texture.
 		if ((entry.status & TexCacheEntry::STATUS_CHANGE_FREQUENT) == 0) {
-			TexCacheEntry::TexStatus alphaStatus = CheckAlpha(pixelData, dstFmt, useUnpack ? bufw : w, w, h);
+			TexCacheEntry::TexStatus alphaStatus = CheckAlpha(pixelData, dstFmt, decPitch / pixelSize, w, h);
 			entry.SetAlphaStatus(alphaStatus, level);
 		} else {
 			entry.SetAlphaStatus(TexCacheEntry::STATUS_ALPHA_UNKNOWN);
@@ -792,10 +788,8 @@ void TextureCacheGLES::LoadTextureLevel(TexCacheEntry &entry, ReplacedTexture &r
 			scaler.ScaleAlways((u32 *)rearrange, (u32 *)pixelData, dstFmt, w, h, scaleFactor);
 			FreeAlignedMemory(pixelData);
 			pixelData = rearrange;
+			decPitch = w * 4;
 		}
-
-		// Textures are always aligned to 16 bytes bufw, so this could safely be 4 always.
-		texByteAlign = dstFmt == GL_UNSIGNED_BYTE ? 4 : 2;
 
 		if (replacer_.Enabled()) {
 			ReplacedTextureDecodeInfo replacedInfo;
@@ -807,8 +801,7 @@ void TextureCacheGLES::LoadTextureLevel(TexCacheEntry &entry, ReplacedTexture &r
 			replacedInfo.scaleFactor = scaleFactor;
 			replacedInfo.fmt = FromGLESFormat(dstFmt);
 
-			int bpp = dstFmt == GL_UNSIGNED_BYTE ? 4 : 2;
-			replacer_.NotifyTextureDecoded(replacedInfo, pixelData, (useUnpack ? bufw : w) * bpp, level, w, h);
+			replacer_.NotifyTextureDecoded(replacedInfo, pixelData, decPitch, level, w, h);
 		}
 	}
 
@@ -841,6 +834,8 @@ bool TextureCacheGLES::GetCurrentTextureDebug(GPUDebugBuffer &buffer, int level)
 
 	// Apply texture may need to rebuild the texture if we're about to render, or bind a framebuffer.
 	TexCacheEntry *entry = nextTexture_;
+	// We might need a render pass to set the sampling params, unfortunately.  Otherwise BuildTexture may crash.
+	framebufferManagerGL_->RebindFramebuffer();
 	ApplyTexture();
 
 	// TODO: Centralize?
@@ -859,6 +854,7 @@ bool TextureCacheGLES::GetCurrentTextureDebug(GPUDebugBuffer &buffer, int level)
 	GLRenderManager *renderManager = (GLRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
 
 	// Not a framebuffer, so let's assume these are right.
+	// TODO: But they may definitely not be, if the texture was scaled.
 	int w = gstate.getTextureWidth(level);
 	int h = gstate.getTextureHeight(level);
 

@@ -55,7 +55,7 @@ void VulkanQueueRunner::ResizeReadbackBuffer(VkDeviceSize requiredSize) {
 
 	VkFlags typeReqs = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 	bool success = vulkan_->MemoryTypeFromProperties(reqs.memoryTypeBits, typeReqs, &alloc.memoryTypeIndex);
-	assert(success);
+	_assert_(success);
 	vkAllocateMemory(device, &alloc, nullptr, &readbackMemory_);
 
 	uint32_t offset = 0;
@@ -64,7 +64,6 @@ void VulkanQueueRunner::ResizeReadbackBuffer(VkDeviceSize requiredSize) {
 
 void VulkanQueueRunner::DestroyDeviceObjects() {
 	ILOG("VulkanQueueRunner::DestroyDeviceObjects");
-	VkDevice device = vulkan_->GetDevice();
 	vulkan_->Delete().QueueDeleteDeviceMemory(readbackMemory_);
 	vulkan_->Delete().QueueDeleteBuffer(readbackBuffer_);
 	readbackBufferSize_ = 0;
@@ -150,7 +149,7 @@ void VulkanQueueRunner::InitBackbufferRenderPass() {
 	rp_info.pDependencies = &dep;
 
 	VkResult res = vkCreateRenderPass(vulkan_->GetDevice(), &rp_info, nullptr, &backbufferRenderPass_);
-	assert(res == VK_SUCCESS);
+	_assert_(res == VK_SUCCESS);
 }
 
 VkRenderPass VulkanQueueRunner::GetRenderPass(const RPKey &key) {
@@ -318,6 +317,9 @@ VkRenderPass VulkanQueueRunner::GetRenderPass(const RPKey &key) {
 	case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
 		// Nothing to do.
 		break;
+	default:
+		_dbg_assert_msg_(G3D, false, "GetRenderPass: Unexpected final color layout %d", (int)key.finalColorLayout);
+		break;
 	}
 
 	if (deps[numDeps].dstAccessMask) {
@@ -463,6 +465,8 @@ void VulkanQueueRunner::ApplyMGSHack(std::vector<VKRStep *> &steps) {
 				if (steps[j]->copy.dst != steps[i]->copy.dst)
 					last = j - 1;
 				break;
+			default:
+				break;
 			}
 			if (last != -1)
 				break;
@@ -535,6 +539,9 @@ void VulkanQueueRunner::ApplySonicHack(std::vector<VKRStep *> &steps) {
 					if (steps[j]->render.numDraws != 3 && steps[j]->render.numDraws != 6)
 						last = j - 1;
 				}
+				break;
+			default:
+				break;
 			}
 			if (last != -1)
 				break;
@@ -644,6 +651,9 @@ void VulkanQueueRunner::LogRenderPass(const VKRStep &pass) {
 		case VKRRenderCommand::PUSH_CONSTANTS:
 			ILOG("  PushConstants(%d)", cmd.push.size);
 			break;
+
+		case VKRRenderCommand::NUM_RENDER_COMMANDS:
+			break;
 		}
 	}
 	ILOG("RenderPass End(%x)", fb);
@@ -675,11 +685,11 @@ void VulkanQueueRunner::PerformRenderPass(const VKRStep &step, VkCommandBuffer c
 			barrier.subresourceRange.layerCount = 1;
 			barrier.subresourceRange.levelCount = 1;
 			barrier.image = iter.fb->color.image;
-			barrier.srcAccessMask = 0;
-			VkPipelineStageFlags srcStage;
-			VkPipelineStageFlags dstStage;
+			VkPipelineStageFlags srcStage{};
+			VkPipelineStageFlags dstStage{};
 			switch (barrier.oldLayout) {
 			case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+			case VK_IMAGE_LAYOUT_UNDEFINED:
 				barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
 				srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 				break;
@@ -692,7 +702,7 @@ void VulkanQueueRunner::PerformRenderPass(const VKRStep &step, VkCommandBuffer c
 				srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 				break;
 			default:
-				Crash();
+				_assert_msg_(G3D, false, "PerformRenderPass: Unexpected oldLayout: %d", (int)barrier.oldLayout);
 				break;
 			}
 			barrier.newLayout = iter.targetLayout;
@@ -702,7 +712,7 @@ void VulkanQueueRunner::PerformRenderPass(const VKRStep &step, VkCommandBuffer c
 				dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
 				break;
 			default:
-				Crash();
+				_assert_msg_(G3D, false, "PerformRenderPass: Unexpected newLayout: %d", (int)barrier.newLayout);
 				break;
 			}
 			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -729,7 +739,6 @@ void VulkanQueueRunner::PerformRenderPass(const VKRStep &step, VkCommandBuffer c
 	VKRFramebuffer *fb = step.render.framebuffer;
 
 	VkPipeline lastPipeline = VK_NULL_HANDLE;
-	VkDescriptorSet lastDescSet = VK_NULL_HANDLE;
 
 	auto &commands = step.commands;
 
@@ -1086,7 +1095,12 @@ void VulkanQueueRunner::SetupTransitionToTransferSrc(VKRImage &img, VkImageMemor
 	}
 	barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-	barrier.subresourceRange.aspectMask = aspect;
+	if (img.format == VK_FORMAT_D16_UNORM_S8_UINT || img.format == VK_FORMAT_D24_UNORM_S8_UINT || img.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+		// Barrier must specify both for combined depth/stencil buffers.
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+	} else {
+		barrier.subresourceRange.aspectMask = aspect;
+	}
 	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	img.layout = barrier.newLayout;
@@ -1140,7 +1154,12 @@ void VulkanQueueRunner::SetupTransitionToTransferDst(VKRImage &img, VkImageMemor
 	}
 	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	barrier.subresourceRange.aspectMask = aspect;
+	if (img.format == VK_FORMAT_D16_UNORM_S8_UINT || img.format == VK_FORMAT_D24_UNORM_S8_UINT || img.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+		// Barrier must specify both for combined depth/stencil buffers.
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+	} else {
+		barrier.subresourceRange.aspectMask = aspect;
+	}
 	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	img.layout = barrier.newLayout;
@@ -1192,11 +1211,9 @@ void VulkanQueueRunner::PerformReadback(const VKRStep &step, VkCommandBuffer cmd
 		VKRImage *srcImage;
 		if (step.readback.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
 			srcImage = &step.readback.src->color;
-		}
-		else if (step.readback.aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+		} else if (step.readback.aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
 			srcImage = &step.readback.src->depth;
-		}
-		else {
+		} else {
 			_dbg_assert_msg_(G3D, false, "No image aspect to readback?");
 			return;
 		}

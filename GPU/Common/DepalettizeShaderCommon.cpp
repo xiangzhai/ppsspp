@@ -114,7 +114,7 @@ void GenerateDepalShader300(char *buffer, GEBufferFormat pixelFormat, ShaderLang
 		texturePixels = 512;
 
 	if (shift) {
-		WRITE(p, "  index = (int(uint(index) >> %i) & 0x%02x)", shift, mask);
+		WRITE(p, "  index = (int(uint(index) >> uint(%i)) & 0x%02x)", shift, mask);
 	} else {
 		WRITE(p, "  index = (index & 0x%02x)", mask);
 	}
@@ -286,6 +286,9 @@ void GenerateDepalShader(char *buffer, GEBufferFormat pixelFormat, ShaderLanguag
 	case HLSL_DX9:
 		GenerateDepalShaderFloat(buffer, pixelFormat, language);
 		break;
+	case HLSL_D3D11_LEVEL9:
+	default:
+		_assert_msg_(G3D, false, "Depal shader language not supported: %d", (int)language);
 	}
 }
 

@@ -398,7 +398,7 @@ void NewLanguageScreen::OnCompleted(DialogResult result) {
 	bool iniLoadedSuccessfully = false;
 	// Allow the lang directory to be overridden for testing purposes (e.g. Android, where it's hard to 
 	// test new languages without recompiling the entire app, which is a hassle).
-	const std::string langOverridePath = g_Config.memStickDirectory + "PSP/SYSTEM/lang/";
+	const std::string langOverridePath = GetSysDirectory(DIRECTORY_SYSTEM) + "lang/";
 
 	// If we run into the unlikely case that "lang" is actually a file, just use the built-in translations.
 	if (!File::Exists(langOverridePath) || !File::IsDirectory(langOverridePath))
@@ -526,15 +526,23 @@ void CreditsScreen::CreateViews() {
 	Button *back = root_->Add(new Button(di->T("Back"), new AnchorLayoutParams(260, 64, NONE, NONE, 10, 10, false)));
 	back->OnClick.Handle(this, &CreditsScreen::OnOK);
 	root_->SetDefaultFocusView(back);
+
+	// Really need to redo this whole layout with some linear layouts...
+
+	int rightYOffset = 0;
 	if (!System_GetPropertyBool(SYSPROP_APP_GOLD)) {
-		root_->Add(new Button(cr->T("Buy Gold"), new AnchorLayoutParams(260, 64, 10, NONE, NONE, 10, false)))->OnClick.Handle(this, &CreditsScreen::OnSupport);
+		root_->Add(new Button(cr->T("Buy Gold"), new AnchorLayoutParams(260, 64, NONE, NONE, 10, 84, false)))->OnClick.Handle(this, &CreditsScreen::OnSupport);
+		rightYOffset = 74;
 	}
-	root_->Add(new Button(cr->T("PPSSPP Forums"), new AnchorLayoutParams(260, 64, 10, NONE, NONE, 84, false)))->OnClick.Handle(this, &CreditsScreen::OnForums);
-	root_->Add(new Button("www.ppsspp.org", new AnchorLayoutParams(260, 64, 10, NONE, NONE, 158, false)))->OnClick.Handle(this, &CreditsScreen::OnPPSSPPOrg);
-	root_->Add(new Button(cr->T("Privacy Policy"), new AnchorLayoutParams(260, 64, 10, NONE, NONE, 232, false)))->OnClick.Handle(this, &CreditsScreen::OnPrivacy);
+	root_->Add(new Button(cr->T("PPSSPP Forums"), new AnchorLayoutParams(260, 64, 10, NONE, NONE, 158, false)))->OnClick.Handle(this, &CreditsScreen::OnForums);
+#if (PPSSPP_PLATFORM(WINDOWS) || PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(LINUX)) && !PPSSPP_PLATFORM(ANDROID)
+	root_->Add(new Button(cr->T("Discord"), new AnchorLayoutParams(260, 64, 10, NONE, NONE, 232, false)))->OnClick.Handle(this, &CreditsScreen::OnDiscord);
+#endif
+	root_->Add(new Button("www.ppsspp.org", new AnchorLayoutParams(260, 64, 10, NONE, NONE, 10, false)))->OnClick.Handle(this, &CreditsScreen::OnPPSSPPOrg);
+	root_->Add(new Button(cr->T("Privacy Policy"), new AnchorLayoutParams(260, 64, 10, NONE, NONE, 84, false)))->OnClick.Handle(this, &CreditsScreen::OnPrivacy);
 #ifdef __ANDROID__
-	root_->Add(new Button(cr->T("Share PPSSPP"), new AnchorLayoutParams(260, 64, NONE, NONE, 10, 84, false)))->OnClick.Handle(this, &CreditsScreen::OnShare);
-	root_->Add(new Button(cr->T("Twitter @PPSSPP_emu"), new AnchorLayoutParams(260, 64, NONE, NONE, 10, 154, false)))->OnClick.Handle(this, &CreditsScreen::OnTwitter);
+	root_->Add(new Button(cr->T("Share PPSSPP"), new AnchorLayoutParams(260, 64, NONE, NONE, 10, rightYOffset + 84, false)))->OnClick.Handle(this, &CreditsScreen::OnShare);
+	root_->Add(new Button(cr->T("Twitter @PPSSPP_emu"), new AnchorLayoutParams(260, 64, NONE, NONE, 10, rightYOffset + 158, false)))->OnClick.Handle(this, &CreditsScreen::OnTwitter);
 #endif
 	if (System_GetPropertyBool(SYSPROP_APP_GOLD)) {
 		root_->Add(new ImageView(I_ICONGOLD, IS_DEFAULT, new AnchorLayoutParams(100, 64, 10, 10, NONE, NONE, false)));
@@ -576,6 +584,11 @@ UI::EventReturn CreditsScreen::OnForums(UI::EventParams &e) {
 	return UI::EVENT_DONE;
 }
 
+UI::EventReturn CreditsScreen::OnDiscord(UI::EventParams &e) {
+	LaunchBrowser("https://discord.gg/5NJB6dD");
+	return UI::EVENT_DONE;
+}
+
 UI::EventReturn CreditsScreen::OnShare(UI::EventParams &e) {
 	I18NCategory *cr = GetI18NCategory("PSPCredits");
 	System_SendMessage("sharetext", cr->T("CheckOutPPSSPP", "Check out PPSSPP, the awesome PSP emulator: http://www.ppsspp.org/"));
@@ -597,6 +610,28 @@ void CreditsScreen::render() {
 	UIScreen::render();
 
 	I18NCategory *cr = GetI18NCategory("PSPCredits");
+
+	std::string specialthanksMaxim = "Maxim ";
+	specialthanksMaxim += cr->T("specialthanksMaxim", "for his amazing Atrac3+ decoder work");
+
+	std::string specialthanksKeithGalocy = "Keith Galocy ";
+	specialthanksKeithGalocy += cr->T("specialthanksKeithGalocy", "at NVIDIA (hardware, advice)");
+
+	std::string specialthanksOrphis = "Orphis (";
+	specialthanksOrphis += cr->T("build server");
+	specialthanksOrphis += ')';
+
+	std::string specialthanksangelxwind = "angelxwind (";
+	specialthanksangelxwind += cr->T("iOS builds");
+	specialthanksangelxwind += ')';
+
+	std::string specialthanksW_MS = "W.MS (";
+	specialthanksW_MS += cr->T("iOS builds");
+	specialthanksW_MS += ')';
+
+	std::string specialthankssolarmystic = "solarmystic (";
+	specialthankssolarmystic += cr->T("testing");
+	specialthankssolarmystic += ')';
 
 	const char * credits[] = {
 		"PPSSPP",
@@ -651,13 +686,13 @@ void CreditsScreen::render() {
 		"zminhquanz",
 		"",
 		cr->T("specialthanks", "Special thanks to:"),
-		"Maxim for his amazing Atrac3+ decoder work",
-		"Keith Galocy at nVidia (hw, advice)",
-		"Orphis (build server)",
-		"angelxwind (iOS builds)",
-		"W.MS (iOS builds)",
-		"solarmystic (testing)",
-		"all the forum mods",
+		specialthanksMaxim.c_str(),
+		specialthanksKeithGalocy.c_str(),
+		specialthanksOrphis.c_str(),
+		specialthanksangelxwind.c_str(),
+		specialthanksW_MS.c_str(),
+		specialthankssolarmystic.c_str(),
+		cr->T("all the forum mods"),
 		"",
 		cr->T("this translation by", ""),   // Empty string as this is the original :)
 		cr->T("translators1", ""),

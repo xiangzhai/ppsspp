@@ -42,6 +42,7 @@
 
 #include "Core/Core.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/Debugger/SymbolMap.h"
 #include "Core/MIPS/JitCommon/JitCommon.h"
 #include "Core/MIPS/JitCommon/JitBlockCache.h"
@@ -53,6 +54,7 @@
 #include "Windows/GEDebugger/GEDebugger.h"
 
 #include "Windows/main.h"
+#include "Windows/DinputDevice.h"
 #include "Windows/EmuThread.h"
 #include "Windows/resource.h"
 
@@ -813,6 +815,10 @@ namespace MainWindow
 		case WM_CHAR:
 			return WindowsRawInput::ProcessChar(hWnd, wParam, lParam);
 
+		case WM_DEVICECHANGE:
+			DinputDevice::CheckDevices();
+			return DefWindowProc(hWnd, message, wParam, lParam);
+
 		case WM_VERYSLEEPY_MSG:
 			switch (wParam) {
 			case VERYSLEEPY_WPARAM_SUPPORTED:
@@ -912,7 +918,7 @@ namespace MainWindow
 			InputDevice::StopPolling();
 			MainThread_Stop();
 			coreState = CORE_POWERUP;
-			ResetUIState();
+			UpdateUIState(UISTATE_MENU);
 			MainThread_Start(g_Config.iGPUBackend == (int)GPUBackend::OPENGL);
 			InputDevice::BeginPolling();
 			break;

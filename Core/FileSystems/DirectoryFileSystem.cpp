@@ -281,8 +281,10 @@ bool DirectoryFileHandle::Open(std::string &basePath, std::string &fileName, Fil
 
 #if HOST_IS_CASE_SENSITIVE
 	if (!success && !(access & FILEACCESS_CREATE)) {
-		if (!FixPathCase(basePath,fileName, FPC_PATH_MUST_EXIST) )
-			return 0;  // or go on and attempt (for a better error code than just 0?)
+		if (!FixPathCase(basePath, fileName, FPC_PATH_MUST_EXIST)) {
+			error = SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND;
+			return false;
+		}
 		fullName = GetLocalPath(basePath,fileName); 
 		const char *fullNameC = fullName.c_str();
 
@@ -825,6 +827,8 @@ static std::string SimulateVFATBug(std::string filename) {
 
 std::vector<PSPFileInfo> DirectoryFileSystem::GetDirListing(std::string path) {
 	std::vector<PSPFileInfo> myVector;
+	bool listingRoot = path == "/" || path == "\\";
+
 #ifdef _WIN32
 	WIN32_FIND_DATA findData;
 	HANDLE hFind;
@@ -849,7 +853,7 @@ std::vector<PSPFileInfo> DirectoryFileSystem::GetDirListing(std::string path) {
 		entry.access = entry.type == FILETYPE_NORMAL ? 0666 : 0777;
 		// TODO: is this just for .. or all subdirectories? Need to add a directory to the test
 		// to find out. Also why so different than the old test results?
-		if (!wcscmp(findData.cFileName, L"..") )
+		if (!wcscmp(findData.cFileName, L".."))
 			entry.size = 4096;
 		else
 			entry.size = findData.nFileSizeLow | ((u64)findData.nFileSizeHigh<<32);
@@ -857,7 +861,8 @@ std::vector<PSPFileInfo> DirectoryFileSystem::GetDirListing(std::string path) {
 		tmFromFiletime(entry.atime, findData.ftLastAccessTime);
 		tmFromFiletime(entry.ctime, findData.ftCreationTime);
 		tmFromFiletime(entry.mtime, findData.ftLastWriteTime);
-		myVector.push_back(entry);
+		if (!listingRoot || (wcscmp(findData.cFileName, L"..") && wcscmp(findData.cFileName, L".")))
+			myVector.push_back(entry);
 
 		int retval = FindNextFile(hFind, &findData);
 		if (!retval)
@@ -897,7 +902,8 @@ std::vector<PSPFileInfo> DirectoryFileSystem::GetDirListing(std::string path) {
 		localtime_r((time_t*)&s.st_atime,&entry.atime);
 		localtime_r((time_t*)&s.st_ctime,&entry.ctime);
 		localtime_r((time_t*)&s.st_mtime,&entry.mtime);
-		myVector.push_back(entry);
+		if (!listingRoot || (strcmp(dirp->d_name, "..") && strcmp(dirp->d_name, ".")))
+			myVector.push_back(entry);
 	}
 	closedir(dp);
 #endif

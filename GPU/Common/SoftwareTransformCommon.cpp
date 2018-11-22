@@ -15,6 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <cmath>
 #include "math/math_util.h"
 #include "gfx_es2/gpu_features.h"
 
@@ -181,18 +182,13 @@ void SoftwareTransform(
 	Lighter lighter(vertType);
 	float fog_end = getFloat24(gstate.fog1);
 	float fog_slope = getFloat24(gstate.fog2);
-	// Same fixup as in ShaderManager.cpp
-	if (my_isinf(fog_slope)) {
-		// not really sure what a sensible value might be.
-		fog_slope = fog_slope < 0.0f ? -10000.0f : 10000.0f;
+	// Same fixup as in ShaderManagerGLES.cpp
+	if (my_isnanorinf(fog_end)) {
+		// Not really sure what a sensible value might be, but let's try 64k.
+		fog_end = std::signbit(fog_end) ? -65535.0f : 65535.0f;
 	}
-	if (my_isnan(fog_slope)) {
-		// Workaround for https://github.com/hrydgard/ppsspp/issues/5384#issuecomment-38365988
-		// Just put the fog far away at a large finite distance.
-		// Infinities and NaNs are rather unpredictable in shaders on many GPUs
-		// so it's best to just make it a sane calculation.
-		fog_end = 100000.0f;
-		fog_slope = 1.0f;
+	if (my_isnanorinf(fog_slope)) {
+		fog_slope = std::signbit(fog_slope) ? -65535.0f : 65535.0f;
 	}
 
 	int colorIndOffset = 0;
@@ -395,8 +391,23 @@ void SoftwareTransform(
 			case GE_TEXMAP_ENVIRONMENT_MAP:
 				// Shade mapping - use two light sources to generate U and V.
 				{
-					Vec3f lightpos0 = Vec3f(&lighter.lpos[gstate.getUVLS0() * 3]).Normalized();
-					Vec3f lightpos1 = Vec3f(&lighter.lpos[gstate.getUVLS1() * 3]).Normalized();
+					auto getLPosFloat = [&](int l, int i) {
+						return getFloat24(gstate.lpos[l * 3 + i]);
+					};
+					auto getLPos = [&](int l) {
+						return Vec3f(getLPosFloat(l, 0), getLPosFloat(l, 1), getLPosFloat(l, 2));
+					};
+					auto calcShadingLPos = [&](int l) {
+						Vec3f pos = getLPos(l);
+						if (pos.Length2() == 0.0f) {
+							return Vec3f(0.0f, 0.0f, 1.0f);
+						} else {
+							return pos.Normalized();
+						}
+					};
+					// Might not have lighting enabled, so don't use lighter.
+					Vec3f lightpos0 = calcShadingLPos(gstate.getUVLS0());
+					Vec3f lightpos1 = calcShadingLPos(gstate.getUVLS1());
 
 					uv[0] = (1.0f + Dot(lightpos0, worldnormal))/2.0f;
 					uv[1] = (1.0f + Dot(lightpos1, worldnormal))/2.0f;

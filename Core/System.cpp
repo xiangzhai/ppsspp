@@ -82,6 +82,9 @@ ParamSFOData g_paramSFO;
 static GlobalUIState globalUIState;
 static CoreParameter coreParameter;
 static FileLoader *loadedFile;
+// For background loading thread.
+static std::mutex loadingLock;
+// For loadingReason updates.
 static std::mutex loadingReasonLock;
 static std::string loadingReason;
 
@@ -97,6 +100,7 @@ volatile bool coreStatePending = false;
 static volatile CPUThreadState cpuThreadState = CPU_THREAD_NOT_RUNNING;
 
 static GPUBackend gpuBackend;
+static std::string gpuBackendDevice;
 
 void ResetUIState() {
 	globalUIState = UISTATE_MENU;
@@ -124,12 +128,17 @@ GlobalUIState GetUIState() {
 	return globalUIState;
 }
 
-void SetGPUBackend(GPUBackend type) {
+void SetGPUBackend(GPUBackend type, const std::string &device) {
 	gpuBackend = type;
+	gpuBackendDevice = device;
 }
 
 GPUBackend GetGPUBackend() {
 	return gpuBackend;
+}
+
+std::string GetGPUBackendDevice() {
+	return gpuBackendDevice;
 }
 
 bool IsAudioInitialised() {
@@ -249,7 +258,18 @@ void CPU_Init() {
 	}
 }
 
+PSP_LoadingLock::PSP_LoadingLock() {
+	loadingLock.lock();
+}
+
+PSP_LoadingLock::~PSP_LoadingLock() {
+	loadingLock.unlock();
+}
+
 void CPU_Shutdown() {
+	// Since we load on a background thread, wait for startup to complete.
+	PSP_LoadingLock lock;
+
 	if (g_Config.bAutoSaveSymbolMap) {
 		host->SaveSymbolMap();
 	}
@@ -385,6 +405,10 @@ bool PSP_IsInited() {
 	return pspIsInited && !pspIsQuitting;
 }
 
+bool PSP_IsQuitting() {
+	return pspIsQuitting;
+}
+
 void PSP_Shutdown() {
 	// Do nothing if we never inited.
 	if (!pspIsInited && !pspIsIniting && !pspIsQuitting) {
@@ -430,9 +454,27 @@ void PSP_EndHostFrame() {
 	}
 }
 
+void PSP_RunLoopWhileState() {
+	// We just run the CPU until we get to vblank. This will quickly sync up pretty nicely.
+	// The actual number of cycles doesn't matter so much here as we will break due to CORE_NEXTFRAME, most of the time hopefully...
+	int blockTicks = usToCycles(1000000 / 10);
+
+	// Run until CORE_NEXTFRAME
+	while (coreState == CORE_RUNNING || coreState == CORE_STEPPING) {
+		PSP_RunLoopFor(blockTicks);
+		if (coreState == CORE_STEPPING) {
+			// Keep the UI responsive.
+			break;
+		}
+	}
+}
+
 void PSP_RunLoopUntil(u64 globalticks) {
 	SaveState::Process();
 	if (coreState == CORE_POWERDOWN || coreState == CORE_ERROR) {
+		return;
+	} else if (coreState == CORE_STEPPING) {
+		Core_ProcessStepping();
 		return;
 	}
 
@@ -574,9 +616,9 @@ void InitSysDirectories() {
 	// expect a standard environment. Skipping THEME though, that's pointless.
 	File::CreateDir(g_Config.memStickDirectory + "PSP");
 	File::CreateDir(g_Config.memStickDirectory + "PSP/COMMON");
-	File::CreateDir(g_Config.memStickDirectory + "PSP/GAME");
-	File::CreateDir(g_Config.memStickDirectory + "PSP/SAVEDATA");
-	File::CreateDir(g_Config.memStickDirectory + "PSP/PPSSPP_STATE");
+	File::CreateDir(GetSysDirectory(DIRECTORY_GAME));
+	File::CreateDir(GetSysDirectory(DIRECTORY_SAVEDATA));
+	File::CreateDir(GetSysDirectory(DIRECTORY_SAVESTATE));
 
 	if (g_Config.currentDirectory.empty()) {
 		g_Config.currentDirectory = GetSysDirectory(DIRECTORY_GAME);

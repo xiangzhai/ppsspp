@@ -182,6 +182,18 @@
     <ClCompile Include="..\android\jni\AndroidVulkanContext.cpp">
       <Filter>Other Platforms</Filter>
     </ClCompile>
+    <ClCompile Include="..\Qt\QtHost.cpp">
+      <Filter>Other Platforms\Qt</Filter>
+    </ClCompile>
+    <ClCompile Include="..\UWP\UWPHost.cpp">
+      <Filter>Other Platforms</Filter>
+    </ClCompile>
+    <ClCompile Include="WindowsAudio.cpp">
+      <Filter>Windows\System</Filter>
+    </ClCompile>
+    <ClCompile Include="WASAPIStream.cpp">
+      <Filter>Windows\System</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Debugger\CtrlDisAsmView.h">
@@ -311,9 +323,6 @@
     <ClInclude Include="..\Qt\mainwindow.h">
       <Filter>Other Platforms\Qt</Filter>
     </ClInclude>
-    <ClInclude Include="..\Qt\Debugger\ctrlvfpuview.h">
-      <Filter>Other Platforms\Qt\Debugger</Filter>
-    </ClInclude>
     <ClInclude Include="GPU\D3D11Context.h">
       <Filter>Windows\System</Filter>
     </ClInclude>
@@ -337,6 +346,18 @@
     </ClInclude>
     <ClInclude Include="..\android\jni\AndroidVulkanContext.h">
       <Filter>Other Platforms</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Qt\QtHost.h">
+      <Filter>Other Platforms\Qt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\UWP\UWPHost.h">
+      <Filter>Other Platforms</Filter>
+    </ClInclude>
+    <ClInclude Include="WindowsAudio.h">
+      <Filter>Windows\System</Filter>
+    </ClInclude>
+    <ClInclude Include="WASAPIStream.h">
+      <Filter>Windows\System</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

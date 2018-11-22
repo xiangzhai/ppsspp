@@ -508,11 +508,17 @@ public:
 	void Draw(UIContext &dc) override;
 	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
 	const std::string &GetText() const { return text_; }
+	void SetPadding(int w, int h) {
+		paddingW_ = w;
+		paddingH_ = h;
+	}
 
 private:
 	Style style_;
 	std::string text_;
 	ImageID imageID_;
+	int paddingW_ = 16;
+	int paddingH_ = 8;
 };
 
 class Slider : public Clickable {
@@ -829,6 +835,7 @@ private:
 enum ImageSizeMode {
 	IS_DEFAULT,
 	IS_FIXED,
+	IS_KEEP_ASPECT,
 };
 
 class ImageView : public InertView {

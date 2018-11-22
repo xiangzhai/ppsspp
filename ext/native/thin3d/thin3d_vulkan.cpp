@@ -301,11 +301,9 @@ struct DescriptorSetKey {
 
 class VKTexture : public Texture {
 public:
-	VKTexture(VulkanContext *vulkan, VkCommandBuffer cmd, VulkanPushBuffer *pushBuffer, const TextureDesc &desc, VulkanDeviceAllocator *alloc)
-		: vulkan_(vulkan), mipLevels_(desc.mipLevels), format_(desc.format) {
-		bool result = Create(cmd, pushBuffer, desc, alloc);
-		_assert_(result);
-	}
+	VKTexture(VulkanContext *vulkan, VkCommandBuffer cmd, VulkanPushBuffer *pushBuffer, const TextureDesc &desc)
+		: vulkan_(vulkan), mipLevels_(desc.mipLevels), format_(desc.format) {}
+	bool Create(VkCommandBuffer cmd, VulkanPushBuffer *pushBuffer, const TextureDesc &desc, VulkanDeviceAllocator *alloc);
 
 	~VKTexture() {
 		Destroy();
@@ -322,8 +320,6 @@ public:
 	}
 
 private:
-	bool Create(VkCommandBuffer cmd, VulkanPushBuffer *pushBuffer, const TextureDesc &desc, VulkanDeviceAllocator *alloc);
-
 	void Destroy() {
 		if (vkTex_) {
 			vkTex_->Destroy();
@@ -335,9 +331,9 @@ private:
 	VulkanContext *vulkan_;
 	VulkanTexture *vkTex_ = nullptr;
 
-	int mipLevels_;
+	int mipLevels_ = 0;
 
-	DataFormat format_;
+	DataFormat format_ = DataFormat::UNDEFINED;
 };
 
 class VKFramebuffer;
@@ -379,6 +375,7 @@ public:
 	void CopyFramebufferImage(Framebuffer *src, int level, int x, int y, int z, Framebuffer *dst, int dstLevel, int dstX, int dstY, int dstZ, int width, int height, int depth, int channelBits) override;
 	bool BlitFramebuffer(Framebuffer *src, int srcX1, int srcY1, int srcX2, int srcY2, Framebuffer *dst, int dstX1, int dstY1, int dstX2, int dstY2, int channelBits, FBBlitFilter filter) override;
 	bool CopyFramebufferToMemorySync(Framebuffer *src, int channelBits, int x, int y, int w, int h, Draw::DataFormat format, void *pixels, int pixelStride) override;
+	DataFormat PreferredFramebufferReadbackFormat(Framebuffer *src) override;
 
 	// These functions should be self explanatory.
 	void BindFramebufferAsRenderTarget(Framebuffer *fbo, const RenderPassInfo &rp) override;
@@ -660,7 +657,7 @@ public:
 		s.mipmapMode = desc.mipFilter == TextureFilter::LINEAR ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
 		s.maxLod = desc.maxLod;
 		VkResult res = vkCreateSampler(vulkan_->GetDevice(), &s, nullptr, &sampler_);
-		assert(VK_SUCCESS == res);
+		_assert_(VK_SUCCESS == res);
 	}
 	~VKSamplerState() {
 		vulkan_->Delete().QueueDeleteSampler(sampler_);
@@ -697,6 +694,10 @@ enum class TextureState {
 bool VKTexture::Create(VkCommandBuffer cmd, VulkanPushBuffer *push, const TextureDesc &desc, VulkanDeviceAllocator *alloc) {
 	// Zero-sized textures not allowed.
 	_assert_(desc.width * desc.height * desc.depth > 0);  // remember to set depth to 1!
+	if (desc.width * desc.height * desc.depth <= 0) {
+		ELOG("Bad texture dimensions %dx%dx%d", desc.width, desc.height, desc.depth);
+		return false;
+	}
 	_assert_(push);
 	format_ = desc.format;
 	mipLevels_ = desc.mipLevels;
@@ -706,7 +707,6 @@ bool VKTexture::Create(VkCommandBuffer cmd, VulkanPushBuffer *push, const Textur
 	vkTex_ = new VulkanTexture(vulkan_, alloc);
 	vkTex_->SetTag(desc.tag);
 	VkFormat vulkanFormat = DataFormatToVulkan(format_);
-	int stride = desc.width * (int)DataFormatSizeInBytes(format_);
 	int bpp = GetBpp(vulkanFormat);
 	int bytesPerPixel = bpp / 8;
 	int usageBits = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -747,6 +747,7 @@ VKContext::VKContext(VulkanContext *vulkan, bool splitSubmit)
 	caps_.tesselationShaderSupported = vulkan->GetFeaturesAvailable().tessellationShader != 0;
 	caps_.multiViewport = vulkan->GetFeaturesAvailable().multiViewport != 0;
 	caps_.dualSourceBlend = vulkan->GetFeaturesAvailable().dualSrcBlend != 0;
+	caps_.depthClampSupported = vulkan->GetFeaturesAvailable().depthClamp != 0;
 	caps_.framebufferBlitSupported = true;
 	caps_.framebufferCopySupported = true;
 	caps_.framebufferDepthBlitSupported = false;  // Can be checked for.
@@ -788,7 +789,7 @@ VKContext::VKContext(VulkanContext *vulkan, bool splitSubmit)
 	for (int i = 0; i < VulkanContext::MAX_INFLIGHT_FRAMES; i++) {
 		frame_[i].pushBuffer = new VulkanPushBuffer(vulkan_, 1024 * 1024);
 		VkResult res = vkCreateDescriptorPool(device_, &dp, nullptr, &frame_[i].descriptorPool);
-		assert(res == VK_SUCCESS);
+		_assert_(res == VK_SUCCESS);
 	}
 
 	// binding 0 - uniform data
@@ -862,7 +863,7 @@ void VKContext::BeginFrame() {
 
 	frame.descSets_.clear();
 	VkResult result = vkResetDescriptorPool(device_, frame.descriptorPool, 0);
-	assert(result == VK_SUCCESS);
+	_assert_(result == VK_SUCCESS);
 }
 
 void VKContext::WaitRenderCompletion(Framebuffer *fbo) {
@@ -903,7 +904,7 @@ VkDescriptorSet VKContext::GetOrCreateDescriptorSet(VkBuffer buf) {
 	alloc.pSetLayouts = &descriptorSetLayout_;
 	alloc.descriptorSetCount = 1;
 	VkResult res = vkAllocateDescriptorSets(device_, &alloc, &descSet);
-	assert(VK_SUCCESS == res);
+	_assert_(VK_SUCCESS == res);
 
 	VkDescriptorBufferInfo bufferDesc;
 	bufferDesc.buffer = buf;
@@ -1078,13 +1079,20 @@ InputLayout *VKContext::CreateInputLayout(const InputLayoutDesc &desc) {
 }
 
 Texture *VKContext::CreateTexture(const TextureDesc &desc) {
-	if (!push_) {
+	VkCommandBuffer initCmd = renderManager_.GetInitCmd();
+	if (!push_ || !initCmd) {
 		// Too early! Fail.
 		ELOG("Can't create textures before the first frame has started.");
 		return nullptr;
 	}
-	_assert_(renderManager_.GetInitCmd());
-	return new VKTexture(vulkan_, renderManager_.GetInitCmd(), push_, desc, allocator_);
+	VKTexture *tex = new VKTexture(vulkan_, initCmd, push_, desc);
+	if (tex->Create(initCmd, push_, desc, allocator_)) {
+		return tex;
+	} else {
+		ELOG("Failed to create texture");
+		delete tex;
+		return nullptr;
+	}
 }
 
 static inline void CopySide(VkStencilOpState &dest, const StencilSide &src) {
@@ -1405,6 +1413,17 @@ bool VKContext::CopyFramebufferToMemorySync(Framebuffer *srcfb, int channelBits,
 	if (channelBits & FBChannel::FB_STENCIL_BIT) aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
 
 	return renderManager_.CopyFramebufferToMemorySync(src ? src->GetFB() : nullptr, aspectMask, x, y, w, h, format, (uint8_t *)pixels, pixelStride);
+}
+
+DataFormat VKContext::PreferredFramebufferReadbackFormat(Framebuffer *src) {
+	if (src) {
+		return DrawContext::PreferredFramebufferReadbackFormat(src);
+	}
+
+	if (vulkan_->GetSwapchainFormat() == VK_FORMAT_B8G8R8A8_UNORM) {
+		return Draw::DataFormat::B8G8R8A8_UNORM;
+	}
+	return DrawContext::PreferredFramebufferReadbackFormat(src);
 }
 
 void VKContext::BindFramebufferAsRenderTarget(Framebuffer *fbo, const RenderPassInfo &rp) {

@@ -25,7 +25,6 @@
 
 #include "Common/MemoryUtil.h"
 #include "Core/MemMap.h"
-#include "Core/Host.h"
 #include "Core/System.h"
 #include "Core/Reporting.h"
 #include "Core/Config.h"
@@ -44,6 +43,7 @@
 #include "GPU/Common/VertexDecoderCommon.h"
 #include "GPU/Common/SoftwareTransformCommon.h"
 #include "GPU/Common/DrawEngineCommon.h"
+#include "GPU/Debugger/Debugger.h"
 #include "GPU/Vulkan/DrawEngineVulkan.h"
 #include "GPU/Vulkan/TextureCacheVulkan.h"
 #include "GPU/Vulkan/ShaderManagerVulkan.h"
@@ -69,6 +69,8 @@ enum {
 	DRAW_BINDING_DYNUBO_LIGHT = 4,
 	DRAW_BINDING_DYNUBO_BONE = 5,
 	DRAW_BINDING_TESS_STORAGE_BUF = 6,
+	DRAW_BINDING_TESS_STORAGE_BUF_WU = 7,
+	DRAW_BINDING_TESS_STORAGE_BUF_WV = 8,
 };
 
 enum {
@@ -87,7 +89,6 @@ DrawEngineVulkan::DrawEngineVulkan(VulkanContext *vulkan, Draw::DrawContext *dra
 	// All this is a LOT of memory, need to see if we can cut down somehow.
 	decoded = (u8 *)AllocateMemoryPages(DECODED_VERTEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 	decIndex = (u16 *)AllocateMemoryPages(DECODED_INDEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
-	splineBuffer = (u8 *)AllocateMemoryPages(SPLINE_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 
 	indexGen.Setup(decIndex);
 
@@ -96,7 +97,7 @@ DrawEngineVulkan::DrawEngineVulkan(VulkanContext *vulkan, Draw::DrawContext *dra
 
 void DrawEngineVulkan::InitDeviceObjects() {
 	// All resources we need for PSP drawing. Usually only bindings 0 and 2-4 are populated.
-	VkDescriptorSetLayoutBinding bindings[7]{};
+	VkDescriptorSetLayoutBinding bindings[9]{};
 	bindings[0].descriptorCount = 1;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -126,6 +127,14 @@ void DrawEngineVulkan::InitDeviceObjects() {
 	bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	bindings[6].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 	bindings[6].binding = DRAW_BINDING_TESS_STORAGE_BUF;
+	bindings[7].descriptorCount = 1;
+	bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[7].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	bindings[7].binding = DRAW_BINDING_TESS_STORAGE_BUF_WU;
+	bindings[8].descriptorCount = 1;
+	bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[8].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	bindings[8].binding = DRAW_BINDING_TESS_STORAGE_BUF_WV;
 
 	VkDevice device = vulkan_->GetDevice();
 
@@ -167,13 +176,13 @@ void DrawEngineVulkan::InitDeviceObjects() {
 
 	vertexCache_ = new VulkanPushBuffer(vulkan_, VERTEX_CACHE_SIZE);
 
-	tessDataTransfer = new TessellationDataTransferVulkan(vulkan_, draw_);
+	tessDataTransferVulkan = new TessellationDataTransferVulkan(vulkan_);
+	tessDataTransfer = tessDataTransferVulkan;
 }
 
 DrawEngineVulkan::~DrawEngineVulkan() {
 	FreeMemoryPages(decoded, DECODED_VERTEX_BUFFER_SIZE);
 	FreeMemoryPages(decIndex, DECODED_INDEX_BUFFER_SIZE);
-	FreeMemoryPages(splineBuffer, SPLINE_BUFFER_SIZE);
 
 	DestroyDeviceObjects();
 }
@@ -201,8 +210,8 @@ void DrawEngineVulkan::FrameData::Destroy(VulkanContext *vulkan) {
 }
 
 void DrawEngineVulkan::DestroyDeviceObjects() {
-	delete tessDataTransfer;
-	tessDataTransfer = nullptr;
+	delete tessDataTransferVulkan;
+	tessDataTransfer = tessDataTransferVulkan = nullptr;
 
 	for (int i = 0; i < VulkanContext::MAX_INFLIGHT_FRAMES; i++) {
 		frame_[i].Destroy(vulkan_);
@@ -258,7 +267,7 @@ void DrawEngineVulkan::BeginFrame() {
 	frame->pushIndex->Begin(vulkan_);
 
 	// TODO: How can we make this nicer...
-	((TessellationDataTransferVulkan *)tessDataTransfer)->SetPushBuffer(frame->pushUBO);
+	tessDataTransferVulkan->SetPushBuffer(frame->pushUBO);
 
 	DirtyAllUBOs();
 
@@ -346,7 +355,7 @@ VkResult DrawEngineVulkan::RecreateDescriptorPool(FrameData &frame, int newSize)
 	dpTypes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 	dpTypes[1].descriptorCount = frame.descPoolSize * 3;  // Don't use these for tess anymore, need max three per set.
 	dpTypes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	dpTypes[2].descriptorCount = frame.descPoolSize;
+	dpTypes[2].descriptorCount = frame.descPoolSize * 3;  // TODO: Use a separate layout when no spline stuff is needed to reduce the need for these.
 	dpTypes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 
 	VkDescriptorPoolCreateInfo dp{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -470,23 +479,32 @@ VkDescriptorSet DrawEngineVulkan::GetOrCreateDescriptorSet(VkImageView imageView
 		n++;
 	}
 
-	// Tessellation data buffer. Make sure this is declared outside the if to avoid optimizer
-	// shenanigans.
-	VkDescriptorBufferInfo tess_buf{};
+	// Tessellation data buffer.
 	if (tess) {
-		VkBuffer buf;
-		VkDeviceSize offset;
-		VkDeviceSize range;
-		((TessellationDataTransferVulkan *)tessDataTransfer)->GetBufferAndOffset(&buf, &offset, &range);
-		assert(buf);
-		tess_buf.buffer = buf;
-		tess_buf.offset = offset;
-		tess_buf.range = range;
-		tessOffset_ = offset;
+		const VkDescriptorBufferInfo *bufInfo = tessDataTransferVulkan->GetBufferInfo();
+		// Control Points
 		writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writes[n].pNext = nullptr;
 		writes[n].dstBinding = DRAW_BINDING_TESS_STORAGE_BUF;
-		writes[n].pBufferInfo = &tess_buf;
+		writes[n].pBufferInfo = &bufInfo[0];
+		writes[n].descriptorCount = 1;
+		writes[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[n].dstSet = desc;
+		n++;
+		// Weights U
+		writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[n].pNext = nullptr;
+		writes[n].dstBinding = DRAW_BINDING_TESS_STORAGE_BUF_WU;
+		writes[n].pBufferInfo = &bufInfo[1];
+		writes[n].descriptorCount = 1;
+		writes[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[n].dstSet = desc;
+		n++;
+		// Weights V
+		writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[n].pNext = nullptr;
+		writes[n].dstBinding = DRAW_BINDING_TESS_STORAGE_BUF_WV;
+		writes[n].pBufferInfo = &bufInfo[2];
 		writes[n].descriptorCount = 1;
 		writes[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		writes[n].dstSet = desc;
@@ -578,7 +596,7 @@ void DrawEngineVulkan::DoFlush() {
 	GEPrimitiveType prim = prevPrim_;
 
 	// Always use software for flat shading to fix the provoking index.
-	bool useHWTransform = CanUseHardwareTransform(prim) && gstate.getShadeMode() != GE_SHADE_FLAT;
+	bool useHWTransform = CanUseHardwareTransform(prim) && (tess || gstate.getShadeMode() != GE_SHADE_FLAT);
 
 	VulkanVertexShader *vshader = nullptr;
 	VulkanFragmentShader *fshader = nullptr;
@@ -784,7 +802,7 @@ void DrawEngineVulkan::DoFlush() {
 			if (prim != lastPrim_ || gstate_c.IsDirty(DIRTY_BLEND_STATE | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_RASTER_STATE | DIRTY_DEPTHSTENCIL_STATE)) {
 				ConvertStateToVulkanKey(*framebufferManager_, shaderManager_, prim, pipelineKey_, dynState_);
 			}
-			Draw::NativeObject object = g_Config.iRenderingMode != 0 ? Draw::NativeObject::FRAMEBUFFER_RENDERPASS : Draw::NativeObject::BACKBUFFER_RENDERPASS;
+			Draw::NativeObject object = g_Config.iRenderingMode != FB_NON_BUFFERED_MODE ? Draw::NativeObject::FRAMEBUFFER_RENDERPASS : Draw::NativeObject::BACKBUFFER_RENDERPASS;
 			VkRenderPass renderPass = (VkRenderPass)draw_->GetNativeObject(object);
 			VulkanPipeline *pipeline = pipelineManager_->GetOrCreatePipeline(pipelineLayout_, renderPass, pipelineKey_, &dec_->decFmt, vshader, fshader, true);
 			if (!pipeline || !pipeline->pipeline) {
@@ -825,8 +843,7 @@ void DrawEngineVulkan::DoFlush() {
 		if (useElements) {
 			if (!ibuf)
 				ibOffset = (uint32_t)frame->pushIndex->Push(decIndex, sizeof(uint16_t) * indexGen.VertexCount(), &ibuf);
-			int numInstances = tess ? numPatches : 1;
-			renderManager->DrawIndexed(pipelineLayout_, ds, ARRAY_SIZE(dynamicUBOOffsets), dynamicUBOOffsets, vbuf, vbOffset, ibuf, ibOffset, vertexCount, numInstances, VK_INDEX_TYPE_UINT16);
+			renderManager->DrawIndexed(pipelineLayout_, ds, ARRAY_SIZE(dynamicUBOOffsets), dynamicUBOOffsets, vbuf, vbOffset, ibuf, ibOffset, vertexCount, 1, VK_INDEX_TYPE_UINT16);
 		} else {
 			renderManager->Draw(pipelineLayout_, ds, ARRAY_SIZE(dynamicUBOOffsets), dynamicUBOOffsets, vbuf, vbOffset, vertexCount);
 		}
@@ -860,9 +877,9 @@ void DrawEngineVulkan::DoFlush() {
 		params.transformedExpanded = transformedExpanded;
 		params.fbman = framebufferManager_;
 		params.texCache = textureCache_;
-		// We have to force drawing of primitives if g_Config.iRenderingMode == 0 (non-buffered) because Vulkan clears
+		// We have to force drawing of primitives if g_Config.iRenderingMode == FB_NON_BUFFERED_MODE because Vulkan clears
 		// do not respect scissor rects.
-		params.allowClear = g_Config.iRenderingMode != 0;
+		params.allowClear = g_Config.iRenderingMode != FB_NON_BUFFERED_MODE;
 		params.allowSeparateAlphaClear = false;
 		params.provokeFlatFirst = true;
 
@@ -889,7 +906,7 @@ void DrawEngineVulkan::DoFlush() {
 				if (prim != lastPrim_ || gstate_c.IsDirty(DIRTY_BLEND_STATE | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_RASTER_STATE | DIRTY_DEPTHSTENCIL_STATE)) {
 					ConvertStateToVulkanKey(*framebufferManager_, shaderManager_, prim, pipelineKey_, dynState_);
 				}
-				Draw::NativeObject object = g_Config.iRenderingMode != 0 ? Draw::NativeObject::FRAMEBUFFER_RENDERPASS : Draw::NativeObject::BACKBUFFER_RENDERPASS;
+				Draw::NativeObject object = g_Config.iRenderingMode != FB_NON_BUFFERED_MODE ? Draw::NativeObject::FRAMEBUFFER_RENDERPASS : Draw::NativeObject::BACKBUFFER_RENDERPASS;
 				VkRenderPass renderPass = (VkRenderPass)draw_->GetNativeObject(object);
 				VulkanPipeline *pipeline = pipelineManager_->GetOrCreatePipeline(pipelineLayout_, renderPass, pipelineKey_, &dec_->decFmt, vshader, fshader, false);
 				if (!pipeline || !pipeline->pipeline) {
@@ -976,7 +993,7 @@ void DrawEngineVulkan::DoFlush() {
 	gstate_c.vertBounds.maxU = 0;
 	gstate_c.vertBounds.maxV = 0;
 
-	host->GPUNotifyDraw();
+	GPUDebug::NotifyDraw();
 }
 
 void DrawEngineVulkan::UpdateUBOs(FrameData *frame) {
@@ -994,16 +1011,7 @@ void DrawEngineVulkan::UpdateUBOs(FrameData *frame) {
 	}
 }
 
-DrawEngineVulkan::TessellationDataTransferVulkan::TessellationDataTransferVulkan(VulkanContext *vulkan, Draw::DrawContext *draw)
-	: TessellationDataTransfer(), vulkan_(vulkan), draw_(draw) {
-}
-
-DrawEngineVulkan::TessellationDataTransferVulkan::~TessellationDataTransferVulkan() {
-}
-
-void DrawEngineVulkan::TessellationDataTransferVulkan::PrepareBuffers(float *&pos, float *&tex, float *&col, int &posStride, int &texStride, int &colStride, int size, bool hasColor, bool hasTexCoords) {
-	colStride = 4;
-
+void TessellationDataTransferVulkan::SendDataToShader(const SimpleVertex *const *points, int size_u, int size_v, u32 vertType, const Spline::Weight2D &weights) {
 	// SSBOs that are not simply float1 or float2 need to be padded up to a float4 size. vec3 members
 	// also need to be 16-byte aligned, hence the padding.
 	struct TessData {
@@ -1012,18 +1020,28 @@ void DrawEngineVulkan::TessellationDataTransferVulkan::PrepareBuffers(float *&po
 		float color[4];
 	};
 
+	int size = size_u * size_v;
+
 	int ssboAlignment = vulkan_->GetPhysicalDeviceProperties(vulkan_->GetCurrentPhysicalDevice()).limits.minStorageBufferOffsetAlignment;
-	uint8_t *data = (uint8_t *)push_->PushAligned(size * sizeof(TessData), &offset_, &buf_, ssboAlignment);
-	range_ = size * sizeof(TessData);
+	uint8_t *data = (uint8_t *)push_->PushAligned(size * sizeof(TessData), (uint32_t *)&bufInfo_[0].offset, &bufInfo_[0].buffer, ssboAlignment);
+	bufInfo_[0].range = size * sizeof(TessData);
 
-	pos = (float *)(data);
-	tex = (float *)(data + offsetof(TessData, uv));
-	col = (float *)(data + offsetof(TessData, color));
-	posStride = sizeof(TessData) / sizeof(float);
-	colStride = hasColor ? (sizeof(TessData) / sizeof(float)) : 0;
-	texStride = sizeof(TessData) / sizeof(float);
-}
+	float *pos = (float *)(data);
+	float *tex = (float *)(data + offsetof(TessData, uv));
+	float *col = (float *)(data + offsetof(TessData, color));
+	int stride = sizeof(TessData) / sizeof(float);
 
-void DrawEngineVulkan::TessellationDataTransferVulkan::SendDataToShader(const float *pos, const float *tex, const float *col, int size, bool hasColor, bool hasTexCoords) {
-	// Nothing to do here! The caller will write directly to the pushbuffer through the pointers it got through PrepareBuffers.
+	CopyControlPoints(pos, tex, col, stride, stride, stride, points, size, vertType);
+
+	using Spline::Weight;
+
+	// Weights U
+	data = (uint8_t *)push_->PushAligned(weights.size_u * sizeof(Weight), (uint32_t *)&bufInfo_[1].offset, &bufInfo_[1].buffer, ssboAlignment);
+	memcpy(data, weights.u, weights.size_u * sizeof(Weight));
+	bufInfo_[1].range = weights.size_u * sizeof(Weight);
+
+	// Weights V
+	data = (uint8_t *)push_->PushAligned(weights.size_v * sizeof(Weight), (uint32_t *)&bufInfo_[2].offset, &bufInfo_[2].buffer, ssboAlignment);
+	memcpy(data, weights.v, weights.size_v * sizeof(Weight));
+	bufInfo_[2].range = weights.size_v * sizeof(Weight);
 }

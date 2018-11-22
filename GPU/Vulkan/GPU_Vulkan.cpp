@@ -18,6 +18,7 @@
 
 #include <thread>
 #include "base/logging.h"
+#include "base/timeutil.h"
 #include "profiler/profiler.h"
 
 #include "Common/ChunkFile.h"
@@ -26,7 +27,6 @@
 #include "Core/Config.h"
 #include "Core/Debugger/Breakpoints.h"
 #include "Core/MemMapHelpers.h"
-#include "Core/Host.h"
 #include "Core/Config.h"
 #include "Core/Reporting.h"
 #include "Core/System.h"
@@ -36,7 +36,7 @@
 #include "GPU/ge_constants.h"
 #include "GPU/GeDisasm.h"
 #include "GPU/Common/FramebufferCommon.h"
-
+#include "GPU/Debugger/Debugger.h"
 #include "GPU/Vulkan/ShaderManagerVulkan.h"
 #include "GPU/Vulkan/GPU_Vulkan.h"
 #include "GPU/Vulkan/FramebufferVulkan.h"
@@ -111,11 +111,17 @@ GPU_Vulkan::GPU_Vulkan(GraphicsContext *gfxCtx, Draw::DrawContext *draw)
 			shaderCacheLoaded_ = true;
 		});
 		th.detach();
+	} else {
+		shaderCacheLoaded_ = true;
 	}
 }
 
 bool GPU_Vulkan::IsReady() {
 	return shaderCacheLoaded_;
+}
+
+void GPU_Vulkan::CancelReady() {
+	pipelineManager_->CancelCache();
 }
 
 void GPU_Vulkan::LoadCache(std::string filename) {
@@ -174,6 +180,8 @@ GPU_Vulkan::~GPU_Vulkan() {
 
 void GPU_Vulkan::CheckGPUFeatures() {
 	uint32_t features = 0;
+
+	features |= GPU_SUPPORTS_VS_RANGE_CULLING;
 
 	switch (vulkan_->GetPhysicalDeviceProperties(vulkan_->GetCurrentPhysicalDevice()).vendorID) {
 	case VULKAN_VENDOR_AMD:
@@ -405,7 +413,7 @@ void GPU_Vulkan::UpdateVsyncInterval(bool force) {
 }
 
 void GPU_Vulkan::SetDisplayFramebuffer(u32 framebuf, u32 stride, GEBufferFormat format) {
-	host->GPUNotifyDisplay(framebuf, stride, format);
+	GPUDebug::NotifyDisplay(framebuf, stride, format);
 	framebufferManager_->SetDisplayFramebuffer(framebuf, stride, format);
 }
 
@@ -426,7 +434,7 @@ void GPU_Vulkan::FinishDeferred() {
 
 inline void GPU_Vulkan::CheckFlushOp(int cmd, u32 diff) {
 	const u8 cmdFlags = cmdInfo_[cmd].flags;
-	if ((cmdFlags & FLAG_FLUSHBEFORE) || (diff && (cmdFlags & FLAG_FLUSHBEFOREONCHANGE))) {
+	if (diff && (cmdFlags & FLAG_FLUSHBEFOREONCHANGE)) {
 		if (dumpThisFrame_) {
 			NOTICE_LOG(G3D, "================ FLUSH ================");
 		}
@@ -489,6 +497,10 @@ void GPU_Vulkan::DestroyDeviceObjects() {
 }
 
 void GPU_Vulkan::DeviceLost() {
+	CancelReady();
+	while (!IsReady()) {
+		sleep_ms(10);
+	}
 	if (!shaderCachePath_.empty()) {
 		SaveCache(shaderCachePath_);
 	}

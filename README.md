@@ -10,6 +10,9 @@ Originally released under the GPL 2.0 (and later) in November 2012
 Official website:
 https://www.ppsspp.org/
 
+Discord:
+https://discord.gg/5NJB6dD
+
 No BIOS file required to play, PPSSPP is an "HLE" emulator.  Default settings balance good compatibility and speed.
 
 To contribute, see [the development page](https://www.ppsspp.org/development.html).  Help testing, investigating, or fixing is always welcome.  See [the list of issues](https://github.com/hrydgard/ppsspp/issues).
@@ -19,6 +22,25 @@ For the latest source code, see [our github page](https://github.com/hrydgard/pp
 For build instructions and other development tutorials, see [the wiki](https://github.com/hrydgard/ppsspp/wiki).
 
 For game compatibility, see [community compatibility feedback](https://report.ppsspp.org/games).
+
+What's new in 1.7.1
+-------------------
+* Minor crashfixes, lang updates
+* Save bug fixed (#11508)
+
+What's new in 1.7.0
+-------------------
+* Fix for insta-crash on Galaxy Note 9, some Xiaomi devices, and the new nVidia Shield (#11441)
+* Vertex range culling on most platforms, fixes DTM: Race Driver and similar (#11393)
+* Major speed boost in some Gundam and Earth Defense Force games (#10973)
+* Fix for issues with post processing shaders in GL 3+ (#11182)
+* Fixes to sound output switching on Windows (WASAPI) (#11438)
+* Detects DirectInput devices when running (#11461)
+* Simple Discord integration (#11307)
+* New debugging APIs (#10909)
+* Task switching made a lot more robust (fixes GPD XD problems) (#11447)
+* Texture decoding optimizations (#11350)
+* Tons and tons of miscellaneous bugfixes and compatibility fixes
 
 What's new in 1.6.3
 -------------------

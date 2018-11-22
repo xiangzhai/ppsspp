@@ -100,7 +100,7 @@ static const TabStateRow stateFlagsRows[] = {
 	{ L"Light 1 enable",       GE_CMD_LIGHTENABLE1,            CMD_FMT_FLAG },
 	{ L"Light 2 enable",       GE_CMD_LIGHTENABLE2,            CMD_FMT_FLAG },
 	{ L"Light 3 enable",       GE_CMD_LIGHTENABLE3,            CMD_FMT_FLAG },
-	{ L"Clip enable",          GE_CMD_CLIPENABLE,              CMD_FMT_FLAG },
+	{ L"Depth clamp enable",   GE_CMD_DEPTHCLAMPENABLE,        CMD_FMT_FLAG },
 	{ L"Cullface enable",      GE_CMD_CULLFACEENABLE,          CMD_FMT_FLAG },
 	{ L"Texture map enable",   GE_CMD_TEXTUREMAPENABLE,        CMD_FMT_FLAG },
 	{ L"Fog enable",           GE_CMD_FOGENABLE,               CMD_FMT_FLAG },
@@ -880,7 +880,7 @@ void CtrlStateValues::OnRightClick(int row, int column, const POINT &point) {
 	SetMenuDefaultItem(subMenu, ID_REGLIST_CHANGE, FALSE);
 
 	// Ehh, kinda ugly.
-	if (rows_ == &watchList[0]) {
+	if (!watchList.empty() && rows_ == &watchList[0]) {
 		ModifyMenu(subMenu, ID_GEDBG_WATCH, MF_BYCOMMAND | MF_STRING, ID_GEDBG_WATCH, L"Remove Watch");
 	} else {
 		ModifyMenu(subMenu, ID_GEDBG_WATCH, MF_BYCOMMAND | MF_STRING, ID_GEDBG_WATCH, L"Add Watch");

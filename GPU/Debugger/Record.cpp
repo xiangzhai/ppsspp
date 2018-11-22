@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2017- PPSSPP Project.
+// Copyright (c) 2017- PPSSPP Project.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -17,6 +17,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
+#include <set>
 #include <vector>
 #include <snappy-c.h>
 #include "base/stringutil.h"
@@ -42,11 +44,16 @@
 namespace GPURecord {
 
 static const char *HEADER = "PPSSPPGE";
-static const int VERSION = 2;
+// Version 1: Uncompressed
+// Version 2: Uses snappy
+// Version 3: Adds FRAMEBUF0-FRAMEBUF9
+static const int VERSION = 3;
+static const int MIN_VERSION = 2;
 
 static bool active = false;
 static bool nextFrame = false;
-static bool writePending = false;
+static int flipLastAction = -1;
+static std::function<void(const std::string &)> writeCallback;
 
 enum class CommandType : u8 {
 	INIT = 0,
@@ -68,6 +75,15 @@ enum class CommandType : u8 {
 	TEXTURE5 = 0x15,
 	TEXTURE6 = 0x16,
 	TEXTURE7 = 0x17,
+
+	FRAMEBUF0 = 0x18,
+	FRAMEBUF1 = 0x19,
+	FRAMEBUF2 = 0x1A,
+	FRAMEBUF3 = 0x1B,
+	FRAMEBUF4 = 0x1C,
+	FRAMEBUF5 = 0x1D,
+	FRAMEBUF6 = 0x1E,
+	FRAMEBUF7 = 0x1F,
 };
 
 #pragma pack(push, 1)
@@ -84,14 +100,41 @@ static std::vector<u8> pushbuf;
 static std::vector<Command> commands;
 static std::vector<u32> lastRegisters;
 static std::vector<u32> lastTextures;
+static std::set<u32> lastRenderTargets;
 
 // TODO: Maybe move execute to another file?
-static u32 execMemcpyDest;
-static u32 execListBuf;
-static u32 execListPos;
-static u32 execListID;
-static const int LIST_BUF_SIZE = 256 * 1024;
-static std::vector<u32> execListQueue;
+class DumpExecute {
+public:
+	~DumpExecute();
+
+	bool Run();
+
+private:
+	void SyncStall();
+	bool SubmitCmds(void *p, u32 sz);
+	void SubmitListEnd();
+
+	void Init(u32 ptr, u32 sz);
+	void Registers(u32 ptr, u32 sz);
+	void Vertices(u32 ptr, u32 sz);
+	void Indices(u32 ptr, u32 sz);
+	void Clut(u32 ptr, u32 sz);
+	void TransferSrc(u32 ptr, u32 sz);
+	void Memset(u32 ptr, u32 sz);
+	void MemcpyDest(u32 ptr, u32 sz);
+	void Memcpy(u32 ptr, u32 sz);
+	void Texture(int level, u32 ptr, u32 sz);
+	void Framebuf(int level, u32 ptr, u32 sz);
+	void Display(u32 ptr, u32 sz);
+
+	u32 execMemcpyDest = 0;
+	u32 execListBuf = 0;
+	u32 execListPos = 0;
+	u32 execListID = 0;
+	const int LIST_BUF_SIZE = 256 * 1024;
+	std::vector<u32> execListQueue;
+	u16 lastBufw_[8]{};
+};
 
 // This class maps pushbuffer (dump data) sections to PSP memory.
 // Dumps can be larger than available PSP memory, because they include generated data too.
@@ -102,7 +145,7 @@ static std::vector<u32> execListQueue;
 class BufMapping {
 public:
 	// Returns a pointer to contiguous memory for this access, or else 0 (failure).
-	u32 Map(u32 bufpos, u32 sz);
+	u32 Map(u32 bufpos, u32 sz, const std::function<void()> &flush);
 
 	// Clear and reset allocations made.
 	void Reset() {
@@ -117,8 +160,8 @@ public:
 	}
 
 protected:
-	u32 MapSlab(u32 bufpos);
-	u32 MapExtra(u32 bufpos, u32 sz);
+	u32 MapSlab(u32 bufpos, const std::function<void()> &flush);
+	u32 MapExtra(u32 bufpos, u32 sz, const std::function<void()> &flush);
 
 	enum {
 		// These numbers kept low because we only have 24 MB of user memory to map into.
@@ -189,20 +232,20 @@ protected:
 
 static BufMapping execMapping;
 
-u32 BufMapping::Map(u32 bufpos, u32 sz) {
+u32 BufMapping::Map(u32 bufpos, u32 sz, const std::function<void()> &flush) {
 	int slab1 = bufpos / SLAB_SIZE;
 	int slab2 = (bufpos + sz - 1) / SLAB_SIZE;
 
 	if (slab1 == slab2) {
 		// Doesn't straddle, so we can just map to a slab.
-		return MapSlab(bufpos);
+		return MapSlab(bufpos, flush);
 	} else {
 		// We need contiguous, so we'll just allocate separately.
-		return MapExtra(bufpos, sz);
+		return MapExtra(bufpos, sz, flush);
 	}
 }
 
-u32 BufMapping::MapSlab(u32 bufpos) {
+u32 BufMapping::MapSlab(u32 bufpos, const std::function<void()> &flush) {
 	u32 slab_pos = (bufpos / SLAB_SIZE) * SLAB_SIZE;
 
 	int best = 0;
@@ -216,6 +259,9 @@ u32 BufMapping::MapSlab(u32 bufpos) {
 		}
 	}
 
+	// Stall before mapping a new slab.
+	flush();
+
 	// Okay, we need to allocate.
 	if (!slabs_[best].Setup(slab_pos)) {
 		return 0;
@@ -223,13 +269,16 @@ u32 BufMapping::MapSlab(u32 bufpos) {
 	return slabs_[best].Ptr(bufpos);
 }
 
-u32 BufMapping::MapExtra(u32 bufpos, u32 sz) {
+u32 BufMapping::MapExtra(u32 bufpos, u32 sz, const std::function<void()> &flush) {
 	for (int i = 0; i < EXTRA_COUNT; ++i) {
 		// Might be likely to reuse larger buffers straddling slabs.
 		if (extra_[i].Matches(bufpos, sz)) {
 			return extra_[i].Ptr();
 		}
 	}
+
+	// Stall first, so we don't stomp existing RAM.
+	flush();
 
 	int i = extraOffset_;
 	extraOffset_ = (extraOffset_ + 1) % EXTRA_COUNT;
@@ -325,7 +374,7 @@ static void FlushRegisters() {
 
 static std::string GenRecordingFilename() {
 	const std::string dumpDir = GetSysDirectory(DIRECTORY_DUMP);
-	const std::string prefix = dumpDir + "/" + g_paramSFO.GetDiscID();
+	const std::string prefix = dumpDir + g_paramSFO.GetDiscID();
 
 	File::CreateFullPath(dumpDir);
 
@@ -339,24 +388,13 @@ static std::string GenRecordingFilename() {
 	return StringFromFormat("%s_%04d.ppdmp", prefix.c_str(), 9999);
 }
 
-static void EmitDisplayBuf() {
-	struct DisplayBufData {
-		PSPPointer<u8> topaddr;
-		u32 linesize, pixelFormat;
-	};
-
-	DisplayBufData disp{};
-	__DisplayGetFramebuf(&disp.topaddr, &disp.linesize, &disp.pixelFormat, 0);
-
-	u32 ptr = (u32)pushbuf.size();
-	u32 sz = (u32)sizeof(disp);
-	pushbuf.resize(pushbuf.size() + sz);
-	memcpy(pushbuf.data() + ptr, &disp, sz);
-
-	commands.push_back({CommandType::DISPLAY, sz, ptr});
-}
-
 static void BeginRecording() {
+	active = true;
+	nextFrame = false;
+	lastTextures.clear();
+	lastRenderTargets.clear();
+	flipLastAction = gpuStats.numFlips;
+
 	u32 ptr = (u32)pushbuf.size();
 	u32 sz = 512 * 4;
 	pushbuf.resize(pushbuf.size() + sz);
@@ -377,9 +415,8 @@ static void WriteCompressed(FILE *fp, const void *p, size_t sz) {
 	delete [] compressed;
 }
 
-static void WriteRecording() {
+static std::string WriteRecording() {
 	FlushRegisters();
-	EmitDisplayBuf();
 
 	const std::string filename = GenRecordingFilename();
 
@@ -398,6 +435,8 @@ static void WriteRecording() {
 	WriteCompressed(fp, pushbuf.data(), bufsz);
 
 	fclose(fp);
+
+	return filename;
 }
 
 static void GetVertDataSizes(int vcount, const void *indices, u32 &vbytes, u32 &ibytes) {
@@ -493,13 +532,36 @@ static void EmitTextureData(int level, u32 texaddr) {
 	int bufw = GetTextureBufw(level, texaddr, format);
 	int extraw = w > bufw ? w - bufw : 0;
 	u32 sizeInRAM = (textureBitsPerPixel[format] * (bufw * h + extraw)) / 8;
+	const bool isTarget = lastRenderTargets.find(texaddr) != lastRenderTargets.end();
 
+	CommandType type = CommandType((int)CommandType::TEXTURE0 + level);
+	const u8 *p = Memory::GetPointerUnchecked(texaddr);
 	u32 bytes = Memory::ValidSize(texaddr, sizeInRAM);
-	if (Memory::IsValidAddress(texaddr)) {
-		FlushRegisters();
+	std::vector<u8> framebufData;
 
-		CommandType type = CommandType((int)CommandType::TEXTURE0 + level);
-		const u8 *p = Memory::GetPointerUnchecked(texaddr);
+	if (Memory::IsVRAMAddress(texaddr)) {
+		struct FramebufData {
+			u32 addr;
+			int bufw;
+			u32 flags;
+			u32 pad;
+		};
+
+		// The isTarget flag is mostly used for replay of dumps on a PSP.
+		u32 flags = isTarget ? 1 : 0;
+		FramebufData framebuf{ texaddr, bufw, flags };
+		framebufData.resize(sizeof(framebuf) + bytes);
+		memcpy(&framebufData[0], &framebuf, sizeof(framebuf));
+		memcpy(&framebufData[sizeof(framebuf)], p, bytes);
+		p = &framebufData[0];
+
+		// Okay, now we'll just emit this instead.
+		type = CommandType((int)CommandType::FRAMEBUF0 + level);
+		bytes += (u32)sizeof(framebuf);
+	}
+
+	if (bytes > 0) {
+		FlushRegisters();
 
 		// Dumps are huge - let's try to find this already emitted.
 		for (u32 prevptr : lastTextures) {
@@ -524,6 +586,9 @@ static void FlushPrimState(int vcount) {
 	// TODO: Eventually, how do we handle texturing from framebuf/zbuf?
 	// TODO: Do we need to preload color/depth/stencil (in case from last frame)?
 
+	lastRenderTargets.insert(PSP_GetVidMemBase() | gstate.getFrameBufRawAddress());
+	lastRenderTargets.insert(PSP_GetVidMemBase() | gstate.getDepthBufRawAddress());
+
 	// We re-flush textures always in case the game changed them... kinda expensive.
 	// TODO: Dirty textures on transfer/stall/etc. somehow?
 	// TODO: Or maybe de-dup by validating if it has changed?
@@ -544,10 +609,10 @@ static void FlushPrimState(int vcount) {
 	u32 vbytes = 0;
 	GetVertDataSizes(vcount, indices, vbytes, ibytes);
 
-	if (indices) {
+	if (indices && ibytes > 0) {
 		EmitCommandWithRAM(CommandType::INDICES, indices, ibytes);
 	}
-	if (verts) {
+	if (verts && vbytes > 0) {
 		EmitCommandWithRAM(CommandType::VERTICES, verts, vbytes);
 	}
 }
@@ -572,7 +637,9 @@ static void EmitTransfer(u32 op) {
 	u32 srcBytes = ((srcY + height - 1) * srcStride + (srcX + width)) * bpp;
 	srcBytes = Memory::ValidSize(srcBasePtr, srcBytes);
 
-	EmitCommandWithRAM(CommandType::TRANSFERSRC, Memory::GetPointerUnchecked(srcBasePtr), srcBytes);
+	if (srcBytes != 0) {
+		EmitCommandWithRAM(CommandType::TRANSFERSRC, Memory::GetPointerUnchecked(srcBasePtr), srcBytes);
+	}
 
 	lastRegisters.push_back(op);
 }
@@ -582,7 +649,9 @@ static void EmitClut(u32 op) {
 	u32 bytes = (op & 0x3F) * 32;
 	bytes = Memory::ValidSize(addr, bytes);
 
-	EmitCommandWithRAM(CommandType::CLUT, Memory::GetPointerUnchecked(addr), bytes);
+	if (bytes != 0) {
+		EmitCommandWithRAM(CommandType::CLUT, Memory::GetPointerUnchecked(addr), bytes);
+	}
 
 	lastRegisters.push_back(op);
 }
@@ -605,23 +674,40 @@ bool IsActive() {
 	return active;
 }
 
-void Activate() {
-	nextFrame = true;
+bool IsActivePending() {
+	return nextFrame || active;
+}
+
+bool Activate() {
+	if (!nextFrame) {
+		nextFrame = true;
+		flipLastAction = gpuStats.numFlips;
+		return true;
+	}
+	return false;
+}
+
+void SetCallback(const std::function<void(const std::string &)> callback) {
+	writeCallback = callback;
+}
+
+static void FinishRecording() {
+	// We're done - this was just to write the result out.
+	std::string filename = WriteRecording();
+	commands.clear();
+	pushbuf.clear();
+
+	NOTICE_LOG(SYSTEM, "Recording finished");
+	active = false;
+	flipLastAction = gpuStats.numFlips;
+
+	if (writeCallback)
+		writeCallback(filename);
+	writeCallback = nullptr;
 }
 
 void NotifyCommand(u32 pc) {
 	if (!active) {
-		return;
-	}
-	if (writePending) {
-		WriteRecording();
-		commands.clear();
-		pushbuf.clear();
-
-		writePending = false;
-		// We're done - this was just to write the result out.
-		NOTICE_LOG(SYSTEM, "Recording finished");
-		active = false;
 		return;
 	}
 
@@ -684,7 +770,9 @@ void NotifyMemcpy(u32 dest, u32 src, u32 sz) {
 		memcpy(pushbuf.data() + cmd.ptr, &dest, sizeof(dest));
 
 		sz = Memory::ValidSize(dest, sz);
-		EmitCommandWithRAM(CommandType::MEMCPYDATA, Memory::GetPointer(dest), sz);
+		if (sz != 0) {
+			EmitCommandWithRAM(CommandType::MEMCPYDATA, Memory::GetPointer(dest), sz);
+		}
 	}
 }
 
@@ -716,22 +804,82 @@ void NotifyUpload(u32 dest, u32 sz) {
 	NotifyMemcpy(dest, dest, sz);
 }
 
-void NotifyFrame() {
-	if (active && !writePending) {
-		// Delay write until the first command of the next frame, so we get the right display buf.
-		NOTICE_LOG(SYSTEM, "Recording complete - waiting to get display buffer");
+void NotifyDisplay(u32 framebuf, int stride, int fmt) {
+	bool writePending = false;
+	if (active && !commands.empty()) {
 		writePending = true;
 	}
-	if (nextFrame) {
-		NOTICE_LOG(SYSTEM, "Recording starting...");
-		active = true;
-		nextFrame = false;
-		lastTextures.clear();
+	if (nextFrame && (gstate_c.skipDrawReason & SKIPDRAW_SKIPFRAME) == 0) {
+		NOTICE_LOG(SYSTEM, "Recording starting on display...");
+		BeginRecording();
+	}
+	if (!active) {
+		return;
+	}
+
+	struct DisplayBufData {
+		PSPPointer<u8> topaddr;
+		int linesize, pixelFormat;
+	};
+
+	DisplayBufData disp{ framebuf, stride, fmt };
+
+	FlushRegisters();
+	u32 ptr = (u32)pushbuf.size();
+	u32 sz = (u32)sizeof(disp);
+	pushbuf.resize(pushbuf.size() + sz);
+	memcpy(pushbuf.data() + ptr, &disp, sz);
+
+	commands.push_back({ CommandType::DISPLAY, sz, ptr });
+
+	if (writePending) {
+		NOTICE_LOG(SYSTEM, "Recording complete on display");
+		FinishRecording();
+	}
+}
+
+void NotifyFrame() {
+	const bool noDisplayAction = flipLastAction + 4 < gpuStats.numFlips;
+	// We do this only to catch things that don't call NotifyDisplay.
+	if (active && !commands.empty() && noDisplayAction) {
+		NOTICE_LOG(SYSTEM, "Recording complete on frame");
+
+		struct DisplayBufData {
+			PSPPointer<u8> topaddr;
+			u32 linesize, pixelFormat;
+		};
+
+		DisplayBufData disp;
+		__DisplayGetFramebuf(&disp.topaddr, &disp.linesize, &disp.pixelFormat, 0);
+
+		FlushRegisters();
+		u32 ptr = (u32)pushbuf.size();
+		u32 sz = (u32)sizeof(disp);
+		pushbuf.resize(pushbuf.size() + sz);
+		memcpy(pushbuf.data() + ptr, &disp, sz);
+
+		commands.push_back({ CommandType::DISPLAY, sz, ptr });
+
+		FinishRecording();
+	}
+	if (nextFrame && (gstate_c.skipDrawReason & SKIPDRAW_SKIPFRAME) == 0 && noDisplayAction) {
+		NOTICE_LOG(SYSTEM, "Recording starting on frame...");
 		BeginRecording();
 	}
 }
 
-static bool ExecuteSubmitCmds(void *p, u32 sz) {
+void DumpExecute::SyncStall() {
+	gpu->UpdateStall(execListID, execListPos);
+	s64 listTicks = gpu->GetListTicks(execListID);
+	if (listTicks != -1) {
+		currentMIPS->downcount -= listTicks - CoreTiming::GetTicks();
+	}
+
+	// Make sure downcount doesn't overflow.
+	CoreTiming::ForceCheck();
+}
+
+bool DumpExecute::SubmitCmds(void *p, u32 sz) {
 	if (execListBuf == 0) {
 		u32 allocSize = LIST_BUF_SIZE;
 		execListBuf = userMemory.Alloc(allocSize, "List buf");
@@ -761,27 +909,47 @@ static bool ExecuteSubmitCmds(void *p, u32 sz) {
 		Memory::Write_U32((GE_CMD_JUMP << 24) | (execListBuf & 0x00FFFFFF), execListPos + 4);
 
 		execListPos = execListBuf;
+
+		// Don't continue until we've stalled.
+		SyncStall();
 	}
 
 	Memory::MemcpyUnchecked(execListPos, execListQueue.data(), pendingSize);
 	execListPos += pendingSize;
+	u32 writePos = execListPos;
 	Memory::MemcpyUnchecked(execListPos, p, sz);
 	execListPos += sz;
 
-	execListQueue.clear();
-	gpu->UpdateStall(execListID, execListPos);
-	s64 listTicks = gpu->GetListTicks(execListID);
-	if (listTicks != -1) {
-		currentMIPS->downcount -= listTicks - CoreTiming::GetTicks();
+	// TODO: Unfortunate.  Maybe Texture commands should contain the bufw instead.
+	// The goal here is to realistically combine prims in dumps.  Stalling for the bufw flushes.
+	u32_le *ops = (u32_le *)Memory::GetPointer(writePos);
+	for (u32 i = 0; i < sz / 4; ++i) {
+		u32 cmd = ops[i] >> 24;
+		if (cmd >= GE_CMD_TEXBUFWIDTH0 && cmd <= GE_CMD_TEXBUFWIDTH7) {
+			int level = cmd - GE_CMD_TEXBUFWIDTH0;
+			u16 bufw = ops[i] & 0xFFFF;
+
+			// NOP the address part of the command to avoid a flush too.
+			if (bufw == lastBufw_[level])
+				ops[i] = GE_CMD_NOP << 24;
+			else
+				ops[i] = (gstate.texbufwidth[level] & 0xFFFF0000) | bufw;
+			lastBufw_[level] = bufw;
+		}
+
+		// Since we're here anyway, also NOP out texture addresses.
+		// This makes Step Tex not hit phantom textures.
+		if (cmd >= GE_CMD_TEXADDR0 && cmd <= GE_CMD_TEXADDR7) {
+			ops[i] = GE_CMD_NOP << 24;
+		}
 	}
 
-	// Make sure downcount doesn't overflow.
-	CoreTiming::ForceCheck();
+	execListQueue.clear();
 
 	return true;
 }
 
-static void ExecuteSubmitListEnd() {
+void DumpExecute::SubmitListEnd() {
 	if (execListPos == 0) {
 		return;
 	}
@@ -791,26 +959,21 @@ static void ExecuteSubmitListEnd() {
 	Memory::Write_U32(GE_CMD_END << 24, execListPos + 4);
 	execListPos += 8;
 
-	gpu->UpdateStall(execListID, execListPos);
-	currentMIPS->downcount -= gpu->GetListTicks(execListID) - CoreTiming::GetTicks();
-
+	SyncStall();
 	gpu->ListSync(execListID, 0);
-
-	// Make sure downcount doesn't overflow.
-	CoreTiming::ForceCheck();
 }
 
-static void ExecuteInit(u32 ptr, u32 sz) {
+void DumpExecute::Init(u32 ptr, u32 sz) {
 	gstate.Restore((u32_le *)(pushbuf.data() + ptr));
 	gpu->ReapplyGfxState();
 }
 
-static void ExecuteRegisters(u32 ptr, u32 sz) {
-	ExecuteSubmitCmds(pushbuf.data() + ptr, sz);
+void DumpExecute::Registers(u32 ptr, u32 sz) {
+	SubmitCmds(pushbuf.data() + ptr, sz);
 }
 
-static void ExecuteVertices(u32 ptr, u32 sz) {
-	u32 psp = execMapping.Map(ptr, sz);
+void DumpExecute::Vertices(u32 ptr, u32 sz) {
+	u32 psp = execMapping.Map(ptr, sz, std::bind(&DumpExecute::SyncStall, this));
 	if (psp == 0) {
 		ERROR_LOG(SYSTEM, "Unable to allocate for vertices");
 		return;
@@ -820,8 +983,8 @@ static void ExecuteVertices(u32 ptr, u32 sz) {
 	execListQueue.push_back((GE_CMD_VADDR << 24) | (psp & 0x00FFFFFF));
 }
 
-static void ExecuteIndices(u32 ptr, u32 sz) {
-	u32 psp = execMapping.Map(ptr, sz);
+void DumpExecute::Indices(u32 ptr, u32 sz) {
+	u32 psp = execMapping.Map(ptr, sz, std::bind(&DumpExecute::SyncStall, this));
 	if (psp == 0) {
 		ERROR_LOG(SYSTEM, "Unable to allocate for indices");
 		return;
@@ -831,8 +994,8 @@ static void ExecuteIndices(u32 ptr, u32 sz) {
 	execListQueue.push_back((GE_CMD_IADDR << 24) | (psp & 0x00FFFFFF));
 }
 
-static void ExecuteClut(u32 ptr, u32 sz) {
-	u32 psp = execMapping.Map(ptr, sz);
+void DumpExecute::Clut(u32 ptr, u32 sz) {
+	u32 psp = execMapping.Map(ptr, sz, std::bind(&DumpExecute::SyncStall, this));
 	if (psp == 0) {
 		ERROR_LOG(SYSTEM, "Unable to allocate for clut");
 		return;
@@ -842,18 +1005,21 @@ static void ExecuteClut(u32 ptr, u32 sz) {
 	execListQueue.push_back((GE_CMD_CLUTADDR << 24) | (psp & 0x00FFFFFF));
 }
 
-static void ExecuteTransferSrc(u32 ptr, u32 sz) {
-	u32 psp = execMapping.Map(ptr, sz);
+void DumpExecute::TransferSrc(u32 ptr, u32 sz) {
+	u32 psp = execMapping.Map(ptr, sz, std::bind(&DumpExecute::SyncStall, this));
 	if (psp == 0) {
 		ERROR_LOG(SYSTEM, "Unable to allocate for transfer");
 		return;
 	}
 
+	// Need to sync in order to access gstate.transfersrcw.
+	SyncStall();
+
 	execListQueue.push_back((gstate.transfersrcw & 0xFF00FFFF) | ((psp >> 8) & 0x00FF0000));
 	execListQueue.push_back(((GE_CMD_TRANSFERSRC) << 24) | (psp & 0x00FFFFFF));
 }
 
-static void ExecuteMemset(u32 ptr, u32 sz) {
+void DumpExecute::Memset(u32 ptr, u32 sz) {
 	struct MemsetCommand {
 		u32 dest;
 		int value;
@@ -863,45 +1029,79 @@ static void ExecuteMemset(u32 ptr, u32 sz) {
 	const MemsetCommand *data = (const MemsetCommand *)(pushbuf.data() + ptr);
 
 	if (Memory::IsVRAMAddress(data->dest)) {
+		SyncStall();
 		gpu->PerformMemorySet(data->dest, (u8)data->value, data->sz);
 	}
 }
 
-static void ExecuteMemcpyDest(u32 ptr, u32 sz) {
+void DumpExecute::MemcpyDest(u32 ptr, u32 sz) {
 	execMemcpyDest = *(const u32 *)(pushbuf.data() + ptr);
 }
 
-static void ExecuteMemcpy(u32 ptr, u32 sz) {
+void DumpExecute::Memcpy(u32 ptr, u32 sz) {
 	if (Memory::IsVRAMAddress(execMemcpyDest)) {
+		SyncStall();
 		Memory::MemcpyUnchecked(execMemcpyDest, pushbuf.data() + ptr, sz);
 		gpu->PerformMemoryUpload(execMemcpyDest, sz);
 	}
 }
 
-static void ExecuteTexture(int level, u32 ptr, u32 sz) {
-	u32 psp = execMapping.Map(ptr, sz);
+void DumpExecute::Texture(int level, u32 ptr, u32 sz) {
+	u32 psp = execMapping.Map(ptr, sz, std::bind(&DumpExecute::SyncStall, this));
 	if (psp == 0) {
 		ERROR_LOG(SYSTEM, "Unable to allocate for texture");
 		return;
 	}
 
-	execListQueue.push_back((gstate.texbufwidth[level] & 0xFF00FFFF) | ((psp >> 8) & 0x00FF0000));
-	execListQueue.push_back(((GE_CMD_TEXADDR0 + level) << 24) | (psp & 0x00FFFFFF));
+	u32 bufwCmd = GE_CMD_TEXBUFWIDTH0 + level;
+	u32 addrCmd = GE_CMD_TEXADDR0 + level;
+	execListQueue.push_back((bufwCmd << 24) | ((psp >> 8) & 0x00FF0000) | lastBufw_[level]);
+	execListQueue.push_back((addrCmd << 24) | (psp & 0x00FFFFFF));
 }
 
-static void ExecuteDisplay(u32 ptr, u32 sz) {
+void DumpExecute::Framebuf(int level, u32 ptr, u32 sz) {
+	struct FramebufData {
+		u32 addr;
+		int bufw;
+		u32 flags;
+		u32 pad;
+	};
+
+	FramebufData *framebuf = (FramebufData *)(pushbuf.data() + ptr);
+
+	u32 bufwCmd = GE_CMD_TEXBUFWIDTH0 + level;
+	u32 addrCmd = GE_CMD_TEXADDR0 + level;
+	execListQueue.push_back((bufwCmd << 24) | ((framebuf->addr >> 8) & 0x00FF0000) | framebuf->bufw);
+	execListQueue.push_back((addrCmd << 24) | (framebuf->addr & 0x00FFFFFF));
+	lastBufw_[level] = framebuf->bufw;
+
+	// And now also copy the data into VRAM (in case it wasn't actually rendered.)
+	u32 headerSize = (u32)sizeof(FramebufData);
+	u32 pspSize = sz - headerSize;
+	const bool isTarget = (framebuf->flags & 1) != 0;
+	// Could potentially always skip if !isTarget, but playing it safe for offset texture behavior.
+	if (Memory::IsValidRange(framebuf->addr, pspSize) && (!isTarget || !g_Config.bSoftwareRendering)) {
+		// Intentionally don't trigger an upload here.
+		Memory::MemcpyUnchecked(framebuf->addr, pushbuf.data() + ptr + headerSize, pspSize);
+	}
+}
+
+void DumpExecute::Display(u32 ptr, u32 sz) {
 	struct DisplayBufData {
 		PSPPointer<u8> topaddr;
-		u32 linesize, pixelFormat;
+		int linesize, pixelFormat;
 	};
 
 	DisplayBufData *disp = (DisplayBufData *)(pushbuf.data() + ptr);
+
+	// Sync up drawing.
+	SyncStall();
 
 	__DisplaySetFramebuf(disp->topaddr.ptr, disp->linesize, disp->pixelFormat, 1);
 	__DisplaySetFramebuf(disp->topaddr.ptr, disp->linesize, disp->pixelFormat, 0);
 }
 
-static void ExecuteFree() {
+DumpExecute::~DumpExecute() {
 	execMemcpyDest = 0;
 	if (execListBuf) {
 		userMemory.Free(execListBuf);
@@ -914,43 +1114,43 @@ static void ExecuteFree() {
 	pushbuf.clear();
 }
 
-static bool ExecuteCommands() {
+bool DumpExecute::Run() {
 	for (const Command &cmd : commands) {
 		switch (cmd.type) {
 		case CommandType::INIT:
-			ExecuteInit(cmd.ptr, cmd.sz);
+			Init(cmd.ptr, cmd.sz);
 			break;
 
 		case CommandType::REGISTERS:
-			ExecuteRegisters(cmd.ptr, cmd.sz);
+			Registers(cmd.ptr, cmd.sz);
 			break;
 
 		case CommandType::VERTICES:
-			ExecuteVertices(cmd.ptr, cmd.sz);
+			Vertices(cmd.ptr, cmd.sz);
 			break;
 
 		case CommandType::INDICES:
-			ExecuteIndices(cmd.ptr, cmd.sz);
+			Indices(cmd.ptr, cmd.sz);
 			break;
 
 		case CommandType::CLUT:
-			ExecuteClut(cmd.ptr, cmd.sz);
+			Clut(cmd.ptr, cmd.sz);
 			break;
 
 		case CommandType::TRANSFERSRC:
-			ExecuteTransferSrc(cmd.ptr, cmd.sz);
+			TransferSrc(cmd.ptr, cmd.sz);
 			break;
 
 		case CommandType::MEMSET:
-			ExecuteMemset(cmd.ptr, cmd.sz);
+			Memset(cmd.ptr, cmd.sz);
 			break;
 
 		case CommandType::MEMCPYDEST:
-			ExecuteMemcpyDest(cmd.ptr, cmd.sz);
+			MemcpyDest(cmd.ptr, cmd.sz);
 			break;
 
 		case CommandType::MEMCPYDATA:
-			ExecuteMemcpy(cmd.ptr, cmd.sz);
+			Memcpy(cmd.ptr, cmd.sz);
 			break;
 
 		case CommandType::TEXTURE0:
@@ -961,11 +1161,22 @@ static bool ExecuteCommands() {
 		case CommandType::TEXTURE5:
 		case CommandType::TEXTURE6:
 		case CommandType::TEXTURE7:
-			ExecuteTexture((int)cmd.type - (int)CommandType::TEXTURE0, cmd.ptr, cmd.sz);
+			Texture((int)cmd.type - (int)CommandType::TEXTURE0, cmd.ptr, cmd.sz);
+			break;
+
+		case CommandType::FRAMEBUF0:
+		case CommandType::FRAMEBUF1:
+		case CommandType::FRAMEBUF2:
+		case CommandType::FRAMEBUF3:
+		case CommandType::FRAMEBUF4:
+		case CommandType::FRAMEBUF5:
+		case CommandType::FRAMEBUF6:
+		case CommandType::FRAMEBUF7:
+			Framebuf((int)cmd.type - (int)CommandType::FRAMEBUF0, cmd.ptr, cmd.sz);
 			break;
 
 		case CommandType::DISPLAY:
-			ExecuteDisplay(cmd.ptr, cmd.sz);
+			Display(cmd.ptr, cmd.sz);
 			break;
 
 		default:
@@ -974,7 +1185,7 @@ static bool ExecuteCommands() {
 		}
 	}
 
-	ExecuteSubmitListEnd();
+	SubmitListEnd();
 	return true;
 }
 
@@ -1006,7 +1217,7 @@ bool RunMountedReplay(const std::string &filename) {
 	pspFileSystem.ReadFile(fp, header, sizeof(header));
 	pspFileSystem.ReadFile(fp, (u8 *)&version, sizeof(version));
 
-	if (memcmp(header, HEADER, sizeof(header)) != 0 || version != VERSION) {
+	if (memcmp(header, HEADER, sizeof(header)) != 0 || version > VERSION || version < MIN_VERSION) {
 		ERROR_LOG(SYSTEM, "Invalid GE dump or unsupported version");
 		pspFileSystem.CloseFile(fp);
 		return false;
@@ -1028,13 +1239,11 @@ bool RunMountedReplay(const std::string &filename) {
 
 	if (truncated) {
 		ERROR_LOG(SYSTEM, "Truncated GE dump");
-		ExecuteFree();
 		return false;
 	}
 
-	bool success = ExecuteCommands();
-	ExecuteFree();
-	return success;
+	DumpExecute executor;
+	return executor.Run();
 }
 
 };

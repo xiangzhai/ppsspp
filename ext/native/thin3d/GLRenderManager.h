@@ -73,6 +73,7 @@ public:
 			glDeleteShader(shader);
 		}
 	}
+
 	GLuint shader = 0;
 	bool valid = false;
 	// Warning: Won't know until a future frame.
@@ -156,8 +157,8 @@ class GLRBuffer {
 public:
 	GLRBuffer(GLuint target, size_t size) : target_(target), size_((int)size) {}
 	~GLRBuffer() {
-		if (buffer) {
-			glDeleteBuffers(1, &buffer);
+		if (buffer_) {
+			glDeleteBuffers(1, &buffer_);
 		}
 	}
 
@@ -168,7 +169,7 @@ public:
 		return mapped_;
 	}
 
-	GLuint buffer = 0;
+	GLuint buffer_ = 0;
 	GLuint target_;
 	int size_;
 
@@ -278,6 +279,7 @@ public:
 
 	size_t GetTotalSize() const;
 
+	void Destroy(bool onRenderThread);
 	void Flush();
 
 protected:
@@ -288,7 +290,6 @@ private:
 	bool AddBuffer();
 	void NextBuffer(size_t minSize);
 	void Defragment();
-	void Destroy(bool onRenderThread);
 
 	GLRenderManager *render_;
 	std::vector<BufInfo> buffers_;
@@ -307,11 +308,12 @@ enum class GLRRunType {
 
 class GLDeleter {
 public:
-	void Perform(GLRenderManager *renderManager);
+	void Perform(GLRenderManager *renderManager, bool skipGLCalls);
 
 	bool IsEmpty() const {
 		return shaders.empty() && programs.empty() && buffers.empty() && textures.empty() && inputLayouts.empty() && framebuffers.empty() && pushBuffers.empty();
 	}
+
 	void Take(GLDeleter &other) {
 		_assert_msg_(G3D, IsEmpty(), "Deleter already has stuff");
 		shaders = std::move(other.shaders);
@@ -528,6 +530,22 @@ public:
 		initSteps_.push_back(step);
 	}
 
+	void TextureSubImage(GLRTexture *texture, int level, int x, int y, int width, int height, GLenum format, GLenum type, uint8_t *data, GLRAllocType allocType = GLRAllocType::NEW) {
+		_dbg_assert_(G3D, curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
+		GLRRenderData _data{ GLRRenderCommand::TEXTURE_SUBIMAGE };
+		_data.texture_subimage.texture = texture;
+		_data.texture_subimage.data = data;
+		_data.texture_subimage.format = format;
+		_data.texture_subimage.type = type;
+		_data.texture_subimage.level = level;
+		_data.texture_subimage.x = x;
+		_data.texture_subimage.y = y;
+		_data.texture_subimage.width = width;
+		_data.texture_subimage.height = height;
+		_data.texture_subimage.allocType = allocType;
+		curRenderStep_->commands.push_back(_data);
+	}
+
 	void FinalizeTexture(GLRTexture *texture, int maxLevels, bool genMips) {
 		GLRInitStep step{ GLRInitStepType::TEXTURE_FINALIZE };
 		step.texture_finalize.texture = texture;
@@ -551,6 +569,9 @@ public:
 		_dbg_assert_(G3D, program != nullptr);
 		data.program.program = program;
 		curRenderStep_->commands.push_back(data);
+#ifdef _DEBUG
+		curProgram_ = program;
+#endif
 	}
 
 	void BindPixelPackBuffer(GLRBuffer *buffer) {  // Want to support an offset but can't in ES 2.0. We supply an offset when binding the buffers instead.
@@ -604,6 +625,9 @@ public:
 
 	void SetUniformI(GLint *loc, int count, const int *udata) {
 		_dbg_assert_(G3D, curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
+#ifdef _DEBUG
+		assert(curProgram_);
+#endif
 		GLRRenderData data{ GLRRenderCommand::UNIFORM4I };
 		data.uniform4.loc = loc;
 		data.uniform4.count = count;
@@ -613,6 +637,9 @@ public:
 
 	void SetUniformI1(GLint *loc, int udata) {
 		_dbg_assert_(G3D, curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
+#ifdef _DEBUG
+		assert(curProgram_);
+#endif
 		GLRRenderData data{ GLRRenderCommand::UNIFORM4I };
 		data.uniform4.loc = loc;
 		data.uniform4.count = 1;
@@ -622,6 +649,9 @@ public:
 
 	void SetUniformF(GLint *loc, int count, const float *udata) {
 		_dbg_assert_(G3D, curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
+#ifdef _DEBUG
+		assert(curProgram_);
+#endif
 		GLRRenderData data{ GLRRenderCommand::UNIFORM4F };
 		data.uniform4.loc = loc;
 		data.uniform4.count = count;
@@ -631,6 +661,9 @@ public:
 
 	void SetUniformF1(GLint *loc, const float udata) {
 		_dbg_assert_(G3D, curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
+#ifdef _DEBUG
+		assert(curProgram_);
+#endif
 		GLRRenderData data{ GLRRenderCommand::UNIFORM4F };
 		data.uniform4.loc = loc;
 		data.uniform4.count = 1;
@@ -640,6 +673,9 @@ public:
 
 	void SetUniformF(const char *name, int count, const float *udata) {
 		_dbg_assert_(G3D, curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
+#ifdef _DEBUG
+		assert(curProgram_);
+#endif
 		GLRRenderData data{ GLRRenderCommand::UNIFORM4F };
 		data.uniform4.name = name;
 		data.uniform4.count = count;
@@ -649,6 +685,9 @@ public:
 
 	void SetUniformM4x4(GLint *loc, const float *udata) {
 		_dbg_assert_(G3D, curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
+#ifdef _DEBUG
+		assert(curProgram_);
+#endif
 		GLRRenderData data{ GLRRenderCommand::UNIFORMMATRIX };
 		data.uniformMatrix4.loc = loc;
 		memcpy(data.uniformMatrix4.m, udata, sizeof(float) * 16);
@@ -657,6 +696,9 @@ public:
 
 	void SetUniformM4x4(const char *name, const float *udata) {
 		_dbg_assert_(G3D, curRenderStep_ && curRenderStep_->stepType == GLRStepType::RENDER);
+#ifdef _DEBUG
+		assert(curProgram_);
+#endif
 		GLRRenderData data{ GLRRenderCommand::UNIFORMMATRIX };
 		data.uniformMatrix4.name = name;
 		memcpy(data.uniformMatrix4.m, udata, sizeof(float) * 16);
@@ -861,6 +903,12 @@ public:
 		return queueRunner_.GetGLString(name);
 	}
 
+	// Used during Android-style ugly shutdown. No need to have a way to set it back because we'll be
+	// destroyed.
+	void SetSkipGLCalls() {
+		skipGLCalls_ = true;
+	}
+
 private:
 	void BeginSubmitFrame(int frame);
 	void EndSubmitFrame(int frame);
@@ -925,6 +973,7 @@ private:
 	bool firstFrame = true;
 
 	GLDeleter deleter_;
+	bool skipGLCalls_ = false;
 
 	int curFrame_ = 0;
 
@@ -937,4 +986,8 @@ private:
 
 	int targetWidth_ = 0;
 	int targetHeight_ = 0;
+
+#ifdef _DEBUG
+	GLRProgram *curProgram_ = nullptr;
+#endif
 };

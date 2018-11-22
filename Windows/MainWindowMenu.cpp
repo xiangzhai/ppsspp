@@ -20,6 +20,7 @@
 #include "GPU/Common/PostShader.h"
 #include "GPU/GLES/FramebufferManagerGLES.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/FileSystems/MetaFileSystem.h"
 #include "UI/OnScreenDisplay.h"
 #include "Windows/MainWindowMenu.h"
@@ -60,10 +61,11 @@ namespace MainWindow {
 		EnableMenuItem(menu, ID_FILE_LOADSTATEFILE, menuEnable);
 		EnableMenuItem(menu, ID_FILE_QUICKSAVESTATE, menuEnable);
 		EnableMenuItem(menu, ID_FILE_QUICKLOADSTATE, menuEnable);
-		EnableMenuItem(menu, ID_TOGGLE_PAUSE, menuEnable);
+		EnableMenuItem(menu, ID_EMULATION_PAUSE, menuEnable);
 		EnableMenuItem(menu, ID_EMULATION_STOP, menuEnable);
 		EnableMenuItem(menu, ID_EMULATION_RESET, menuEnable);
 		EnableMenuItem(menu, ID_EMULATION_SWITCH_UMD, umdSwitchEnable);
+		EnableMenuItem(menu, ID_TOGGLE_BREAK, menuEnable);
 		EnableMenuItem(menu, ID_DEBUG_LOADMAPFILE, menuEnable);
 		EnableMenuItem(menu, ID_DEBUG_SAVEMAPFILE, menuEnable);
 		EnableMenuItem(menu, ID_DEBUG_LOADSYMFILE, menuEnable);
@@ -142,6 +144,7 @@ namespace MainWindow {
 		const std::wstring visitForum = ConvertUTF8ToWString(des->T("PPSSPP Forums"));
 		const std::wstring buyGold = ConvertUTF8ToWString(des->T("Buy Gold"));
 		const std::wstring gitHub = ConvertUTF8ToWString(des->T("GitHub"));
+		const std::wstring discord = ConvertUTF8ToWString(des->T("Discord"));
 		const std::wstring aboutPPSSPP = ConvertUTF8ToWString(des->T("About PPSSPP..."));
 
 		// Simply remove the old help menu and create a new one.
@@ -155,6 +158,7 @@ namespace MainWindow {
 		// Repeat the process for other languages, if necessary.
 		AppendMenu(helpMenu, MF_STRING | MF_BYCOMMAND, ID_HELP_BUYGOLD, buyGold.c_str());
 		AppendMenu(helpMenu, MF_STRING | MF_BYCOMMAND, ID_HELP_GITHUB, gitHub.c_str());
+		AppendMenu(helpMenu, MF_STRING | MF_BYCOMMAND, ID_HELP_DISCORD, discord.c_str());
 		AppendMenu(helpMenu, MF_SEPARATOR, 0, 0);
 		AppendMenu(helpMenu, MF_STRING | MF_BYCOMMAND, ID_HELP_ABOUT, aboutPPSSPP.c_str());
 	}
@@ -270,7 +274,7 @@ namespace MainWindow {
 		TranslateMenuItem(menu, ID_FILE_EXIT, L"\tAlt+F4");
 
 		// Emulation menu
-		TranslateMenuItem(menu, ID_TOGGLE_PAUSE, L"\tF8", "Pause");
+		TranslateMenuItem(menu, ID_EMULATION_PAUSE);
 		TranslateMenuItem(menu, ID_EMULATION_STOP, L"\tCtrl+W");
 		TranslateMenuItem(menu, ID_EMULATION_RESET, L"\tCtrl+B");
 		TranslateMenuItem(menu, ID_EMULATION_SWITCH_UMD, L"\tCtrl+U", "Switch UMD");
@@ -281,16 +285,17 @@ namespace MainWindow {
 		TranslateMenuItem(menu, ID_EMULATION_ROTATION_V_R);
 
 		// Debug menu
+		TranslateMenuItem(menu, ID_TOGGLE_BREAK, L"\tF8", "Break");
+		TranslateMenuItem(menu, ID_DEBUG_BREAKONLOAD);
+		TranslateMenuItem(menu, ID_DEBUG_IGNOREILLEGALREADS);
 		TranslateMenuItem(menu, ID_DEBUG_LOADMAPFILE);
 		TranslateMenuItem(menu, ID_DEBUG_SAVEMAPFILE);
 		TranslateMenuItem(menu, ID_DEBUG_LOADSYMFILE);
 		TranslateMenuItem(menu, ID_DEBUG_SAVESYMFILE);
 		TranslateMenuItem(menu, ID_DEBUG_RESETSYMBOLTABLE);
-		TranslateMenuItem(menu, ID_DEBUG_DUMPNEXTFRAME);
 		TranslateMenuItem(menu, ID_DEBUG_TAKESCREENSHOT, L"\tF12");
+		TranslateMenuItem(menu, ID_DEBUG_DUMPNEXTFRAME);
 		TranslateMenuItem(menu, ID_DEBUG_SHOWDEBUGSTATISTICS);
-		TranslateMenuItem(menu, ID_DEBUG_IGNOREILLEGALREADS);
-		TranslateMenuItem(menu, ID_DEBUG_RUNONLOAD);
 		TranslateMenuItem(menu, ID_DEBUG_DISASSEMBLY, L"\tCtrl+D");
 		TranslateMenuItem(menu, ID_DEBUG_GEDEBUGGER, L"\tCtrl+G");
 		TranslateMenuItem(menu, ID_DEBUG_EXTRACTFILE);
@@ -324,12 +329,16 @@ namespace MainWindow {
 		TranslateMenuItem(menu, ID_OPTIONS_DIRECT3D11);
 		TranslateMenuItem(menu, ID_OPTIONS_DIRECT3D9);
 		TranslateMenuItem(menu, ID_OPTIONS_OPENGL);
+		TranslateMenuItem(menu, ID_OPTIONS_VULKAN);
+
 		TranslateSubMenu(menu, "Rendering Mode", MENU_OPTIONS, SUBMENU_RENDERING_MODE);
 		TranslateMenuItem(menu, ID_OPTIONS_NONBUFFEREDRENDERING);
 		TranslateMenuItem(menu, ID_OPTIONS_BUFFEREDRENDERING);
 		TranslateSubMenu(menu, "Frame Skipping", MENU_OPTIONS, SUBMENU_FRAME_SKIPPING, L"\tF7");
 		TranslateMenuItem(menu, ID_OPTIONS_FRAMESKIP_AUTO);
 		TranslateMenuItem(menu, ID_OPTIONS_FRAMESKIP_0);
+		TranslateMenuItem(menu, ID_OPTIONS_FRAMESKIPTYPE_COUNT);
+		TranslateMenuItem(menu, ID_OPTIONS_FRAMESKIPTYPE_PRCNT);
 		// Skip frameskipping 1-8..
 		TranslateSubMenu(menu, "Texture Filtering", MENU_OPTIONS, SUBMENU_TEXTURE_FILTERING);
 		TranslateMenuItem(menu, ID_OPTIONS_TEXTUREFILTERING_AUTO);
@@ -470,9 +479,9 @@ namespace MainWindow {
 		g_Config.iInternalScreenRotation = rotation;
 	}
 
-	static void SaveStateActionFinished(bool result, const std::string &message, void *userdata) {
+	static void SaveStateActionFinished(SaveState::Status status, const std::string &message, void *userdata) {
 		if (!message.empty()) {
-			osm.Show(message, 2.0);
+			osm.Show(message, status == SaveState::Status::SUCCESS ? 2.0 : 5.0);
 		}
 		PostMessage(MainWindow::GetHWND(), WM_USER_SAVESTATE_FINISH, 0, 0);
 	}
@@ -514,10 +523,6 @@ namespace MainWindow {
 		NativeMessageReceived("gpu_resized", "");
 	}
 
-	static void setFpsLimit(int fps) {
-		g_Config.iFpsLimit = fps;
-	}
-
 	static void setFrameSkipping(int framesToSkip = -1) {
 		if (framesToSkip >= FRAMESKIP_OFF)
 			g_Config.iFrameSkip = framesToSkip;
@@ -535,6 +540,26 @@ namespace MainWindow {
 			messageStream << gr->T("Off");
 		else
 			messageStream << g_Config.iFrameSkip;
+
+		osm.Show(messageStream.str());
+	}
+
+	static void setFrameSkippingType(int fskipType = -1) {
+		if (fskipType >= 0 && fskipType <= 1) {
+			g_Config.iFrameSkipType = fskipType;
+		} else {
+			g_Config.iFrameSkipType = 0;
+		}
+
+		I18NCategory *gr = GetI18NCategory("Graphics");
+
+		std::ostringstream messageStream;
+		messageStream << gr->T("Frame Skipping Type") << ":" << " ";
+
+		if (g_Config.iFrameSkipType == 0)
+			messageStream << gr->T("Number of Frames");
+		else
+			messageStream << gr->T("Percent of FPS");
 
 		osm.Show(messageStream.str());
 	}
@@ -582,7 +607,7 @@ namespace MainWindow {
 			ShellExecute(NULL, L"open", ConvertUTF8ToWString(g_Config.memStickDirectory).c_str(), 0, 0, SW_SHOW);
 			break;
 
-		case ID_TOGGLE_PAUSE:
+		case ID_TOGGLE_BREAK:
 			if (GetUIState() == UISTATE_PAUSEMENU) {
 				// Causes hang
 				//NativeMessageReceived("run", "");
@@ -601,6 +626,11 @@ namespace MainWindow {
 					Core_EnableStepping(true);
 			}
 			noFocusPause = !noFocusPause;	// If we pause, override pause on lost focus
+			break;
+
+		case ID_EMULATION_PAUSE:
+			NativeMessageReceived("pause", "");
+			Core_EnableStepping(false);
 			break;
 
 		case ID_EMULATION_STOP:
@@ -767,21 +797,25 @@ namespace MainWindow {
 
 		case ID_OPTIONS_DIRECT3D9:
 			g_Config.iGPUBackend = (int)GPUBackend::DIRECT3D9;
+			g_Config.Save();
 			RestartApp();
 			break;
 
 		case ID_OPTIONS_DIRECT3D11:
 			g_Config.iGPUBackend = (int)GPUBackend::DIRECT3D11;
+			g_Config.Save();
 			RestartApp();
 			break;
 
 		case ID_OPTIONS_OPENGL:
 			g_Config.iGPUBackend = (int)GPUBackend::OPENGL;
+			g_Config.Save();
 			RestartApp();
 			break;
 
 		case ID_OPTIONS_VULKAN:
 			g_Config.iGPUBackend = (int)GPUBackend::VULKAN;
+			g_Config.Save();
 			RestartApp();
 			break;
 
@@ -813,15 +847,19 @@ namespace MainWindow {
 		case ID_OPTIONS_FRAMESKIP_7:    setFrameSkipping(FRAMESKIP_7); break;
 		case ID_OPTIONS_FRAMESKIP_8:    setFrameSkipping(FRAMESKIP_MAX); break;
 
+		case ID_OPTIONS_FRAMESKIPTYPE_COUNT:    setFrameSkippingType(FRAMESKIPTYPE_COUNT); break;
+		case ID_OPTIONS_FRAMESKIPTYPE_PRCNT:    setFrameSkippingType(FRAMESKIPTYPE_PRCNT); break;
+
 		case ID_OPTIONS_FRAMESKIPDUMMY:
 			setFrameSkipping();
+			setFrameSkippingType();
 			break;
 
 		case ID_FILE_EXIT:
 			PostMessage(hWnd, WM_CLOSE, 0, 0);
 			break;
 
-		case ID_DEBUG_RUNONLOAD:
+		case ID_DEBUG_BREAKONLOAD:
 			g_Config.bAutoRun = !g_Config.bAutoRun;
 			break;
 
@@ -1004,6 +1042,10 @@ namespace MainWindow {
 			ShellExecute(NULL, L"open", L"https://github.com/hrydgard/ppsspp/", NULL, NULL, SW_SHOWNORMAL);
 			break;
 
+		case ID_HELP_DISCORD:
+			ShellExecute(NULL, L"open", L"https://discord.gg/5NJB6dD", NULL, NULL, SW_SHOWNORMAL);
+			break;
+
 		case ID_HELP_ABOUT:
 			DialogManager::EnableAll(FALSE);
 			DialogBox(hInst, (LPCTSTR)IDD_ABOUTBOX, hWnd, (DLGPROC)About);
@@ -1055,11 +1097,13 @@ namespace MainWindow {
 		CHECKITEM(ID_DEBUG_IGNOREILLEGALREADS, g_Config.bIgnoreBadMemAccess);
 		CHECKITEM(ID_DEBUG_SHOWDEBUGSTATISTICS, g_Config.bShowDebugStats);
 		CHECKITEM(ID_OPTIONS_HARDWARETRANSFORM, g_Config.bHardwareTransform);
-		CHECKITEM(ID_DEBUG_RUNONLOAD, g_Config.bAutoRun);
+		CHECKITEM(ID_DEBUG_BREAKONLOAD, !g_Config.bAutoRun);
 		CHECKITEM(ID_OPTIONS_VERTEXCACHE, g_Config.bVertexCache);
 		CHECKITEM(ID_OPTIONS_SHOWFPS, g_Config.iShowFPSCounter);
 		CHECKITEM(ID_OPTIONS_FRAMESKIP_AUTO, g_Config.bAutoFrameSkip);
-		CHECKITEM(ID_OPTIONS_FRAMESKIP, g_Config.iFrameSkip != 0);
+		CHECKITEM(ID_OPTIONS_FRAMESKIP, g_Config.iFrameSkip != FRAMESKIP_OFF);
+		CHECKITEM(ID_OPTIONS_FRAMESKIPTYPE_COUNT, g_Config.iFrameSkipType == FRAMESKIPTYPE_COUNT);
+		CHECKITEM(ID_OPTIONS_FRAMESKIPTYPE_PRCNT, g_Config.iFrameSkipType == FRAMESKIPTYPE_PRCNT);
 		CHECKITEM(ID_OPTIONS_VSYNC, g_Config.bVSync);
 		CHECKITEM(ID_OPTIONS_TOPMOST, g_Config.bTopMost);
 		CHECKITEM(ID_OPTIONS_PAUSE_FOCUS, g_Config.bPauseOnLostFocus);
@@ -1232,6 +1276,12 @@ namespace MainWindow {
 			ID_OPTIONS_FRAMESKIP_7,
 			ID_OPTIONS_FRAMESKIP_8,
 		};
+
+		static const int frameskippingType[] = {
+			ID_OPTIONS_FRAMESKIPTYPE_COUNT,
+			ID_OPTIONS_FRAMESKIPTYPE_PRCNT,
+		};
+
 		if (g_Config.iFrameSkip < FRAMESKIP_OFF)
 			g_Config.iFrameSkip = FRAMESKIP_OFF;
 
@@ -1240,6 +1290,10 @@ namespace MainWindow {
 
 		for (int i = 0; i < ARRAY_SIZE(frameskipping); i++) {
 			CheckMenuItem(menu, frameskipping[i], MF_BYCOMMAND | ((i == g_Config.iFrameSkip) ? MF_CHECKED : MF_UNCHECKED));
+		}
+
+		for (int i = 0; i < ARRAY_SIZE(frameskippingType); i++) {
+			CheckMenuItem(menu, frameskippingType[i], MF_BYCOMMAND | ((i == g_Config.iFrameSkipType) ? MF_CHECKED : MF_UNCHECKED));
 		}
 
 		static const int savestateSlot[] = {
@@ -1322,7 +1376,7 @@ namespace MainWindow {
 		lastGlobalUIState = GetUIState();
 
 		bool isPaused = Core_IsStepping() && GetUIState() == UISTATE_INGAME;
-		TranslateMenuItem(menu, ID_TOGGLE_PAUSE, L"\tF8", isPaused ? "Run" : "Pause");
+		TranslateMenuItem(menu, ID_TOGGLE_BREAK, L"\tF8", isPaused ? "Run" : "Break");
 	}
 
 	// Message handler for about box.

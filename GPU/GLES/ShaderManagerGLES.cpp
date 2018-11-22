@@ -19,8 +19,9 @@
 #include "Common/CommonWindows.h"
 #endif
 
-#include <map>
+#include <cmath>
 #include <cstdio>
+#include <map>
 
 #include "math/dataconv.h"
 #include "base/logging.h"
@@ -41,9 +42,10 @@
 #include "GPU/Math3D.h"
 #include "GPU/GPUState.h"
 #include "GPU/ge_constants.h"
+#include "GPU/Common/ShaderUniforms.h"
 #include "GPU/GLES/ShaderManagerGLES.h"
 #include "GPU/GLES/DrawEngineGLES.h"
-#include "FramebufferManagerGLES.h"
+#include "GPU/GLES/FramebufferManagerGLES.h"
 
 Shader::Shader(GLRenderManager *render, const char *code, const std::string &desc, uint32_t glShaderType, bool useHWTransform, uint32_t attrMask, uint64_t uniformMask)
 	  : render_(render), failed_(false), useHWTransform_(useHWTransform), attrMask_(attrMask), uniformMask_(uniformMask) {
@@ -115,6 +117,8 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 	else
 		numBones = 0;
 	queries.push_back({ &u_depthRange, "u_depthRange" });
+	queries.push_back({ &u_cullRangeMin, "u_cullRangeMin" });
+	queries.push_back({ &u_cullRangeMax, "u_cullRangeMax" });
 
 #ifdef USE_BONE_ARRAY
 	queries.push_back({ &u_bone, "u_bone" });
@@ -155,13 +159,10 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 
 	// We need to fetch these unconditionally, gstate_c.spline or bezier will not be set if we
 	// create this shader at load time from the shader cache.
-	queries.push_back({ &u_tess_pos_tex, "u_tess_pos_tex" });
-	queries.push_back({ &u_tess_tex_tex, "u_tess_tex_tex" });
-	queries.push_back({ &u_tess_col_tex, "u_tess_col_tex" });
-	queries.push_back({ &u_spline_count_u, "u_spline_count_u" });
-	queries.push_back({ &u_spline_count_v, "u_spline_count_v" });
-	queries.push_back({ &u_spline_type_u, "u_spline_type_u" });
-	queries.push_back({ &u_spline_type_v, "u_spline_type_v" });
+	queries.push_back({ &u_tess_points, "u_tess_points" });
+	queries.push_back({ &u_tess_weights_u, "u_tess_weights_u" });
+	queries.push_back({ &u_tess_weights_v, "u_tess_weights_v" });
+	queries.push_back({ &u_spline_counts, "u_spline_counts" });
 	queries.push_back({ &u_depal, "u_depal" });
 
 	attrMask = vs->GetAttrMask();
@@ -172,9 +173,9 @@ LinkedShader::LinkedShader(GLRenderManager *render, VShaderID VSID, Shader *vs, 
 	initialize.push_back({ &u_fbotex,       0, 1 });
 	initialize.push_back({ &u_testtex,      0, 2 });
 	initialize.push_back({ &u_pal,          0, 3 }); // CLUT
-	initialize.push_back({ &u_tess_pos_tex, 0, 4 }); // Texture unit 4
-	initialize.push_back({ &u_tess_tex_tex, 0, 5 }); // Texture unit 5
-	initialize.push_back({ &u_tess_col_tex, 0, 6 }); // Texture unit 6
+	initialize.push_back({ &u_tess_points,  0, 4 }); // Control Points
+	initialize.push_back({ &u_tess_weights_u, 0, 5 });
+	initialize.push_back({ &u_tess_weights_v, 0, 6 });
 
 	program = render->CreateProgram(shaders, semantics, queries, initialize, gstate_c.featureFlags & GPU_SUPPORTS_DUALSOURCE_BLEND);
 
@@ -383,22 +384,15 @@ void LinkedShader::UpdateUniforms(u32 vertType, const ShaderID &vsid) {
 			getFloat24(gstate.fog1),
 			getFloat24(gstate.fog2),
 		};
-		if (my_isinf(fogcoef[1])) {
-			// not really sure what a sensible value might be.
-			fogcoef[1] = fogcoef[1] < 0.0f ? -10000.0f : 10000.0f;
-		} else if (my_isnan(fogcoef[1])) {
-			// Workaround for https://github.com/hrydgard/ppsspp/issues/5384#issuecomment-38365988
-			// Just put the fog far away at a large finite distance.
-			// Infinities and NaNs are rather unpredictable in shaders on many GPUs
-			// so it's best to just make it a sane calculation.
-			fogcoef[0] = 100000.0f;
-			fogcoef[1] = 1.0f;
+		// The PSP just ignores infnan here (ignoring IEEE), so take it down to a valid float.
+		// Workaround for https://github.com/hrydgard/ppsspp/issues/5384#issuecomment-38365988
+		if (my_isnanorinf(fogcoef[0])) {
+			// Not really sure what a sensible value might be, but let's try 64k.
+			fogcoef[0] = std::signbit(fogcoef[0]) ? -65535.0f : 65535.0f;
 		}
-#ifndef MOBILE_DEVICE
-		else if (my_isnanorinf(fogcoef[1]) || my_isnanorinf(fogcoef[0])) {
-			ERROR_LOG_REPORT_ONCE(fognan, G3D, "Unhandled fog NaN/INF combo: %f %f", fogcoef[0], fogcoef[1]);
+		if (my_isnanorinf(fogcoef[1])) {
+			fogcoef[1] = std::signbit(fogcoef[1]) ? -65535.0f : 65535.0f;
 		}
-#endif
 		render_->SetUniformF(&u_fogcoef, 2, fogcoef);
 	}
 
@@ -461,7 +455,7 @@ void LinkedShader::UpdateUniforms(u32 vertType, const ShaderID &vsid) {
 	if (dirty & DIRTY_TEXMATRIX) {
 		SetMatrix4x3(render_, &u_texmtx, gstate.tgenMatrix);
 	}
-	if ((dirty & DIRTY_DEPTHRANGE) && u_depthRange != -1) {
+	if (dirty & DIRTY_DEPTHRANGE) {
 		// Since depth is [-1, 1] mapping to [minz, maxz], this is easyish.
 		float vpZScale = gstate.getViewportZScale();
 		float vpZCenter = gstate.getViewportZCenter();
@@ -486,6 +480,12 @@ void LinkedShader::UpdateUniforms(u32 vertType, const ShaderID &vsid) {
 
 		float data[4] = { viewZScale, viewZCenter, viewZCenter, viewZInvScale };
 		SetFloatUniform4(render_, &u_depthRange, data);
+	}
+	if (dirty & DIRTY_CULLRANGE) {
+		float minValues[4], maxValues[4];
+		CalcCullRange(minValues, maxValues, g_Config.iRenderingMode == FB_NON_BUFFERED_MODE, true);
+		SetFloatUniform4(render_, &u_cullRangeMin, minValues);
+		SetFloatUniform4(render_, &u_cullRangeMax, maxValues);
 	}
 
 	if (dirty & DIRTY_STENCILREPLACEVALUE) {
@@ -564,13 +564,9 @@ void LinkedShader::UpdateUniforms(u32 vertType, const ShaderID &vsid) {
 	}
 
 	if (dirty & DIRTY_BEZIERSPLINE) {
-		render_->SetUniformI1(&u_spline_count_u, gstate_c.spline_count_u);
-		if (u_spline_count_v != -1)
-			render_->SetUniformI1(&u_spline_count_v, gstate_c.spline_count_v);
-		if (u_spline_type_u != -1)
-			render_->SetUniformI1(&u_spline_type_u, gstate_c.spline_type_u);
-		if (u_spline_type_v != -1)
-			render_->SetUniformI1(&u_spline_type_v, gstate_c.spline_type_v);
+		if (u_spline_counts != -1) {
+			render_->SetUniformI1(&u_spline_counts, gstate_c.spline_num_points_u);
+		}
 	}
 }
 
@@ -625,7 +621,7 @@ void ShaderManagerGLES::DirtyShader() {
 	shaderSwitchDirtyUniforms_ = 0;
 }
 
-void ShaderManagerGLES::DirtyLastShader() { // disables vertex arrays
+void ShaderManagerGLES::DirtyLastShader() {
 	lastShader_ = nullptr;
 	lastVShaderSame_ = false;
 }
@@ -692,10 +688,7 @@ Shader *ShaderManagerGLES::ApplyVertexShader(int prim, u32 vertType, VShaderID *
 			// Can still work with software transform.
 			VShaderID vsidTemp;
 			ComputeVertexShaderID(&vsidTemp, vertType, false);
-			uint32_t attrMask;
-			uint64_t uniformMask;
-			GenerateVertexShader(vsidTemp, codeBuffer_, &attrMask, &uniformMask);
-			vs = new Shader(render_, codeBuffer_, VertexShaderDesc(vsidTemp), GL_VERTEX_SHADER, false, attrMask, uniformMask);
+			vs = CompileVertexShader(vsidTemp);
 		}
 
 		vsCache_.Insert(*VSID, vs);
@@ -988,6 +981,10 @@ bool ShaderManagerGLES::ContinuePrecompile(float sliceTime) {
 	pending.Clear();
 
 	return true;
+}
+
+void ShaderManagerGLES::CancelPrecompile() {
+	diskCachePending_.Clear();
 }
 
 void ShaderManagerGLES::Save(const std::string &filename) {

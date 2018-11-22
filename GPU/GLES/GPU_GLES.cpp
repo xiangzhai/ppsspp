@@ -35,7 +35,7 @@
 #include "GPU/ge_constants.h"
 #include "GPU/GeDisasm.h"
 #include "GPU/Common/FramebufferCommon.h"
-
+#include "GPU/Debugger/Debugger.h"
 #include "GPU/GLES/ShaderManagerGLES.h"
 #include "GPU/GLES/GPU_GLES.h"
 #include "GPU/GLES/FramebufferManagerGLES.h"
@@ -109,8 +109,7 @@ GPU_GLES::GPU_GLES(GraphicsContext *gfxCtx, Draw::DrawContext *draw)
 	if (g_Config.bHardwareTessellation) {
 		// Disable hardware tessellation if device is unsupported.
 		bool hasTexelFetch = gl_extensions.GLES3 || (!gl_extensions.IsGLES && gl_extensions.VersionGEThan(3, 3, 0)) || gl_extensions.EXT_gpu_shader4;
-		if (!gstate_c.SupportsAll(GPU_SUPPORTS_INSTANCE_RENDERING | GPU_SUPPORTS_VERTEX_TEXTURE_FETCH | GPU_SUPPORTS_TEXTURE_FLOAT) || !hasTexelFetch) {
-			// TODO: Check unsupported device name list.(Above gpu features are supported but it has issues with weak gpu, memory, shader compiler etc...)
+		if (!gstate_c.SupportsAll(GPU_SUPPORTS_VERTEX_TEXTURE_FETCH | GPU_SUPPORTS_TEXTURE_FLOAT) || !hasTexelFetch) {
 			g_Config.bHardwareTessellation = false;
 			ERROR_LOG(G3D, "Hardware Tessellation is unsupported, falling back to software tessellation");
 			I18NCategory *gr = GetI18NCategory("Graphics");
@@ -168,6 +167,7 @@ void GPU_GLES::CheckGPUFeatures() {
 	u32 features = 0;
 
 	features |= GPU_SUPPORTS_16BIT_FORMATS;
+	features |= GPU_SUPPORTS_VS_RANGE_CULLING;
 
 	if (gl_extensions.ARB_blend_func_extended || gl_extensions.EXT_blend_func_extended) {
 		if (!gl_extensions.VersionGEThan(3, 0, 0)) {
@@ -190,11 +190,18 @@ void GPU_GLES::CheckGPUFeatures() {
 	}
 
 	if (gl_extensions.IsGLES) {
-		if (gl_extensions.GLES3)
+		if (gl_extensions.GLES3) {
 			features |= GPU_SUPPORTS_GLSL_ES_300;
+			// Mali reports 30 but works fine...
+			if (gl_extensions.range[1][5][1] >= 30) {
+				features |= GPU_SUPPORTS_32BIT_INT_FSHADER;
+			}
+		}
 	} else {
-		if (gl_extensions.VersionGEThan(3, 3, 0))
+		if (gl_extensions.VersionGEThan(3, 3, 0)) {
 			features |= GPU_SUPPORTS_GLSL_330;
+			features |= GPU_SUPPORTS_32BIT_INT_FSHADER;
+		}
 	}
 
 	if (gl_extensions.EXT_shader_framebuffer_fetch || gl_extensions.NV_shader_framebuffer_fetch || gl_extensions.ARM_shader_framebuffer_fetch) {
@@ -304,6 +311,10 @@ bool GPU_GLES::IsReady() {
 	return shaderManagerGL_->ContinuePrecompile();
 }
 
+void  GPU_GLES::CancelReady() {
+	shaderManagerGL_->CancelPrecompile();
+}
+
 void GPU_GLES::BuildReportingInfo() {
 	GLRenderManager *render = (GLRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
 
@@ -333,6 +344,7 @@ void GPU_GLES::DeviceLost() {
 	// Simply drop all caches and textures.
 	// FBOs appear to survive? Or no?
 	// TransformDraw has registered as a GfxResourceHolder.
+	CancelReady();
 	shaderManagerGL_->DeviceLost();
 	textureCacheGL_->DeviceLost();
 	fragmentTestCache_.DeviceLost();
@@ -392,9 +404,10 @@ inline void GPU_GLES::UpdateVsyncInterval(bool force) {
 	if (PSP_CoreParameter().unthrottle) {
 		desiredVSyncInterval = 0;
 	}
-	if (PSP_CoreParameter().fpsLimit == 1) {
+	if (PSP_CoreParameter().fpsLimit != FPSLimit::NORMAL) {
+		int limit = PSP_CoreParameter().fpsLimit == FPSLimit::CUSTOM1 ? g_Config.iFpsLimit1 : g_Config.iFpsLimit2;
 		// For an alternative speed that is a clean factor of 60, the user probably still wants vsync.
-		if (g_Config.iFpsLimit == 0 || (g_Config.iFpsLimit != 15 && g_Config.iFpsLimit != 30 && g_Config.iFpsLimit != 60)) {
+		if (limit == 0 || (limit >= 0 && limit != 15 && limit != 30 && limit != 60)) {
 			desiredVSyncInterval = 0;
 		}
 	}
@@ -442,7 +455,7 @@ void GPU_GLES::BeginFrame() {
 }
 
 void GPU_GLES::SetDisplayFramebuffer(u32 framebuf, u32 stride, GEBufferFormat format) {
-	host->GPUNotifyDisplay(framebuf, stride, format);
+	GPUDebug::NotifyDisplay(framebuf, stride, format);
 	framebufferManagerGL_->SetDisplayFramebuffer(framebuf, stride, format);
 }
 
@@ -459,7 +472,7 @@ void GPU_GLES::CopyDisplayToOutput() {
 	// If buffered, discard the depth buffer of the backbuffer. Don't even know if we need one.
 #if 0
 #ifdef USING_GLES2
-	if (gl_extensions.EXT_discard_framebuffer && g_Config.iRenderingMode != 0) {
+	if (gl_extensions.EXT_discard_framebuffer && g_Config.iRenderingMode != FB_NON_BUFFERED_MODE) {
 		GLenum attachments[] = {GL_DEPTH_EXT, GL_STENCIL_EXT};
 		glDiscardFramebufferEXT(GL_FRAMEBUFFER, 2, attachments);
 	}

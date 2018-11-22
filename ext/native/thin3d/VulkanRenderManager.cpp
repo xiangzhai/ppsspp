@@ -91,7 +91,7 @@ void CreateImage(VulkanContext *vulkan, VkCommandBuffer cmd, VKRImage &img, int 
 		break;
 	default:
 		Crash();
-		break;
+		return;
 	}
 
 	TransitionImageLayout2(cmd, img.image, 0, 1, aspects,
@@ -174,13 +174,9 @@ void VulkanRenderManager::CreateBackbuffers() {
 		color_image_view.flags = 0;
 		color_image_view.image = sc_buffer.image;
 
-		// Pre-set them to PRESENT_SRC_KHR, as the first thing we do after acquiring
-		// in image to render to will be to transition them away from that.
-		TransitionImageLayout2(cmdInit, sc_buffer.image, 0, 1,
-			VK_IMAGE_ASPECT_COLOR_BIT,
-			VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-			VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
-			0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+		// We leave the images as UNDEFINED, there's no need to pre-transition them as
+		// the backbuffer renderpass starts out with them being auto-transitioned from UNDEFINED anyway.
+		// Also, turns out it's illegal to transition un-acquired images, thanks Hans-Kristian. See #11417.
 
 		res = vkCreateImageView(vulkan_->GetDevice(), &color_image_view, nullptr, &sc_buffer.view);
 		swapchainImages_.push_back(sc_buffer);
@@ -263,7 +259,6 @@ void VulkanRenderManager::DestroyBackbuffers() {
 	StopThread();
 	vulkan_->WaitUntilQueueIdle();
 
-	VkDevice device = vulkan_->GetDevice();
 	for (uint32_t i = 0; i < swapchainImageCount_; i++) {
 		vulkan_->Delete().QueueDeleteImageView(swapchainImages_[i].view);
 	}
@@ -289,7 +284,6 @@ VulkanRenderManager::~VulkanRenderManager() {
 	vkDestroySemaphore(device, acquireSemaphore_, nullptr);
 	vkDestroySemaphore(device, renderingCompleteSemaphore_, nullptr);
 	for (int i = 0; i < vulkan_->GetInflightFrames(); i++) {
-		VkCommandBuffer cmdBuf[2]{ frameData_[i].mainCmd, frameData_[i].initCmd };
 		vkFreeCommandBuffers(device, frameData_[i].cmdPoolInit, 1, &frameData_[i].initCmd);
 		vkFreeCommandBuffers(device, frameData_[i].cmdPoolMain, 1, &frameData_[i].mainCmd);
 		vkDestroyCommandPool(device, frameData_[i].cmdPoolInit, nullptr);
@@ -386,7 +380,9 @@ VkCommandBuffer VulkanRenderManager::GetInitCmd() {
 			VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
 		};
 		VkResult res = vkBeginCommandBuffer(frameData.initCmd, &begin);
-		assert(res == VK_SUCCESS);
+		if (res != VK_SUCCESS) {
+			return VK_NULL_HANDLE;
+		}
 		frameData.hasInitCommands = true;
 	}
 	return frameData_[curFrame].initCmd;
@@ -450,15 +446,14 @@ bool VulkanRenderManager::CopyFramebufferToMemorySync(VKRFramebuffer *src, int a
 
 	FlushSync();
 
-	Draw::DataFormat srcFormat;
+	Draw::DataFormat srcFormat = Draw::DataFormat::UNDEFINED;
 	if (aspectBits & VK_IMAGE_ASPECT_COLOR_BIT) {
 		if (src) {
 			switch (src->color.format) {
 			case VK_FORMAT_R8G8B8A8_UNORM: srcFormat = Draw::DataFormat::R8G8B8A8_UNORM; break;
 			default: _assert_(false);
 			}
-		}
-		else {
+		} else {
 			// Backbuffer.
 			if (!(vulkan_->GetSurfaceCapabilities().supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
 				ELOG("Copying from backbuffer not supported, can't take screenshots");
@@ -1011,7 +1006,7 @@ void VulkanRenderManager::EndSyncFrame(int frame) {
 		VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
 	};
 	VkResult res = vkBeginCommandBuffer(frameData.mainCmd, &begin);
-	assert(res == VK_SUCCESS);
+	_assert_(res == VK_SUCCESS);
 
 	if (useThread_) {
 		std::unique_lock<std::mutex> lock(frameData.push_mutex);

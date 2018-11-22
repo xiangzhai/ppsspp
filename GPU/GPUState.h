@@ -58,7 +58,7 @@ struct GPUgstate {
 				region2,
 				lightingEnable,
 				lightEnable[4],
-				clipEnable,
+				depthClampEnable,
 				cullfaceEnable,
 				textureMapEnable,  // 0x1E GE_CMD_TEXTUREMAPENABLE
 				fogEnable,
@@ -392,8 +392,9 @@ struct GPUgstate {
 	int getRegionX2() const { return (region2 & 0x3FF); }
 	int getRegionY2() const { return (region2 >> 10) & 0x3FF; }
 
+	bool isDepthClampEnabled() const { return depthClampEnable & 1; }
+
 	// Note that the X1/Y1/Z1 here does not mean the upper-left corner, but half the dimensions. X2/Y2/Z2 are the center.
-	bool isClippingEnabled() const { return clipEnable & 1; }
 	float getViewportXScale() const { return getFloat24(viewportxscale); }
 	float getViewportYScale() const { return getFloat24(viewportyscale); }
 	float getViewportZScale() const { return getFloat24(viewportzscale); }
@@ -465,7 +466,7 @@ enum {
 	GPU_SUPPORTS_DUALSOURCE_BLEND = FLAG_BIT(0),
 	GPU_SUPPORTS_GLSL_ES_300 = FLAG_BIT(1),
 	GPU_SUPPORTS_GLSL_330 = FLAG_BIT(2),
-	GPU_SUPPORTS_UNPACK_SUBIMAGE = FLAG_BIT(3),
+	GPU_SUPPORTS_VS_RANGE_CULLING = FLAG_BIT(3),
 	GPU_SUPPORTS_BLEND_MINMAX = FLAG_BIT(4),
 	GPU_SUPPORTS_LOGIC_OP = FLAG_BIT(5),
 	GPU_USE_DEPTH_RANGE_HACK = FLAG_BIT(6),
@@ -477,6 +478,7 @@ enum {
 	GPU_SUPPORTS_TEXTURE_FLOAT = FLAG_BIT(12),
 	GPU_SUPPORTS_16BIT_FORMATS = FLAG_BIT(13),
 	GPU_SUPPORTS_DEPTH_CLAMP = FLAG_BIT(14),
+	GPU_SUPPORTS_32BIT_INT_FSHADER = FLAG_BIT(15),
 	GPU_SUPPORTS_LARGE_VIEWPORTS = FLAG_BIT(16),
 	GPU_SUPPORTS_ACCURATE_DEPTH = FLAG_BIT(17),
 	GPU_SUPPORTS_VAO = FLAG_BIT(18),
@@ -601,10 +603,7 @@ struct GPUStateCache {
 
 	bool bezier;
 	bool spline;
-	int spline_count_u;
-	int spline_count_v;
-	int spline_type_u;
-	int spline_type_v;
+	int spline_num_points_u;
 
 	bool useShaderDepal;
 	GEBufferFormat depalFramebufferFormat;

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 
 #include "ShaderUniforms.h"
 #include "base/display.h"
@@ -7,6 +8,7 @@
 #include "math/math_util.h"
 #include "math/lin/vec3.h"
 #include "GPU/GPUState.h"
+#include "GPU/Common/FramebufferCommon.h"
 #include "GPU/Common/GPUStateUtils.h"
 #include "GPU/Math3D.h"
 #include "Core/Reporting.h"
@@ -22,6 +24,49 @@ static void ConvertProjMatrixToD3D11(Matrix4x4 &in) {
 	const Vec3 trans(0, 0, gstate_c.vpZOffset * 0.5f + 0.5f);
 	const Vec3 scale(gstate_c.vpWidthScale, -gstate_c.vpHeightScale, gstate_c.vpDepthScale * 0.5f);
 	in.translateAndScale(trans, scale);
+}
+
+void CalcCullRange(float minValues[4], float maxValues[4], bool flipViewport, bool hasNegZ) {
+	// Account for the projection viewport adjustment when viewport is too large.
+	auto reverseViewportX = [](float x) {
+		float pspViewport = (x - gstate.getViewportXCenter()) * (1.0f / gstate.getViewportXScale());
+		return (pspViewport - gstate_c.vpXOffset) * gstate_c.vpWidthScale;
+	};
+	auto reverseViewportY = [flipViewport](float y) {
+		float heightScale = gstate_c.vpHeightScale;
+		if (flipViewport) {
+			// For D3D11 and GLES non-buffered.
+			heightScale = -heightScale;
+		}
+		float pspViewport = (y - gstate.getViewportYCenter()) * (1.0f / gstate.getViewportYScale());
+		return (pspViewport - gstate_c.vpYOffset) * heightScale;
+	};
+	auto reverseViewportZ = [hasNegZ](float z) {
+		float pspViewport = (z - gstate.getViewportZCenter()) * (1.0f / gstate.getViewportZScale());
+		// Differs from GLES: depth is 0 to 1, not -1 to 1.
+		float realViewport = (pspViewport - gstate_c.vpZOffset) * gstate_c.vpDepthScale;
+		return hasNegZ ? realViewport : (realViewport * 0.5f + 0.5f);
+	};
+	auto sortPair = [](float a, float b) {
+		return a > b ? std::make_pair(b, a) : std::make_pair(a, b);
+	};
+
+	// The PSP seems to use 0.12.4 for X and Y, and 0.16.0 for Z.
+	// Any vertex outside this range (unless depth clamp enabled) is discarded.
+	auto x = sortPair(reverseViewportX(0.0f), reverseViewportX(4096.0f));
+	auto y = sortPair(reverseViewportY(0.0f), reverseViewportY(4096.0f));
+	auto z = sortPair(reverseViewportZ(0.0f), reverseViewportZ(65535.5f));
+	// Since we have space in w, use it to pass the depth clamp flag.  We also pass NAN for w "discard".
+	float clampEnable = gstate.isDepthClampEnabled() ? 1.0f : 0.0f;
+
+	minValues[0] = x.first;
+	minValues[1] = y.first;
+	minValues[2] = z.first;
+	minValues[3] = clampEnable;
+	maxValues[0] = x.second;
+	maxValues[1] = y.second;
+	maxValues[2] = z.second;
+	maxValues[3] = NAN;
 }
 
 void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipViewport) {
@@ -82,7 +127,7 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 			ConvertProjMatrixToVulkan(flippedMatrix);
 		}
 
-		if (g_Config.iRenderingMode == 0 && g_display_rotation != DisplayRotation::ROTATE_0) {
+		if (g_Config.iRenderingMode == FB_NON_BUFFERED_MODE && g_display_rotation != DisplayRotation::ROTATE_0) {
 			flippedMatrix = flippedMatrix * g_display_rot_matrix;
 		}
 
@@ -96,7 +141,7 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 		} else {
 			proj_through.setOrthoVulkan(0.0f, gstate_c.curRTWidth, 0, gstate_c.curRTHeight, 0, 1);
 		}
-		if (g_Config.iRenderingMode == 0 && g_display_rotation != DisplayRotation::ROTATE_0) {
+		if (g_Config.iRenderingMode == FB_NON_BUFFERED_MODE && g_display_rotation != DisplayRotation::ROTATE_0) {
 			proj_through = proj_through * g_display_rot_matrix;
 		}
 		CopyMatrix4x4(ub->proj_through, proj_through.getReadPtr());
@@ -118,22 +163,15 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 			getFloat24(gstate.fog1),
 			getFloat24(gstate.fog2),
 		};
-		if (my_isinf(fogcoef[1])) {
-			// not really sure what a sensible value might be.
-			fogcoef[1] = fogcoef[1] < 0.0f ? -10000.0f : 10000.0f;
-		} else if (my_isnan(fogcoef[1])) {
-			// Workaround for https://github.com/hrydgard/ppsspp/issues/5384#issuecomment-38365988
-			// Just put the fog far away at a large finite distance.
-			// Infinities and NaNs are rather unpredictable in shaders on many GPUs
-			// so it's best to just make it a sane calculation.
-			fogcoef[0] = 100000.0f;
-			fogcoef[1] = 1.0f;
+		// The PSP just ignores infnan here (ignoring IEEE), so take it down to a valid float.
+		// Workaround for https://github.com/hrydgard/ppsspp/issues/5384#issuecomment-38365988
+		if (my_isnanorinf(fogcoef[0])) {
+			// Not really sure what a sensible value might be, but let's try 64k.
+			fogcoef[0] = std::signbit(fogcoef[0]) ? -65535.0f : 65535.0f;
 		}
-#ifndef MOBILE_DEVICE
-		else if (my_isnanorinf(fogcoef[1]) || my_isnanorinf(fogcoef[0])) {
-			ERROR_LOG_REPORT_ONCE(fognan, G3D, "Unhandled fog NaN/INF combo: %f %f", fogcoef[0], fogcoef[1]);
+		if (my_isnanorinf(fogcoef[1])) {
+			fogcoef[1] = std::signbit(fogcoef[1]) ? -65535.0f : 65535.0f;
 		}
-#endif
 		CopyFloat2(ub->fogCoef, fogcoef);
 	}
 
@@ -197,8 +235,12 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool flipView
 		ub->depthRange[3] = viewZInvScale;
 	}
 
+	if (dirtyUniforms & DIRTY_CULLRANGE) {
+		CalcCullRange(ub->cullRangeMin, ub->cullRangeMax, flipViewport, false);
+	}
+
 	if (dirtyUniforms & DIRTY_BEZIERSPLINE) {
-		ub->spline_counts = BytesToUint32(gstate_c.spline_count_u, gstate_c.spline_count_v, gstate_c.spline_type_u, gstate_c.spline_type_v);
+		ub->spline_counts = gstate_c.spline_num_points_u;
 	}
 
 	if (dirtyUniforms & DIRTY_DEPAL) {

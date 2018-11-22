@@ -38,6 +38,7 @@ protected:
 	void CreateViews() override;
 	void CallbackRestoreDefaults(bool yes);
 	void CallbackRenderingBackend(bool yes);
+	void CallbackRenderingDevice(bool yes);
 	bool UseVerticalLayout() const;
 
 private:
@@ -87,6 +88,7 @@ private:
 	UI::EventReturn OnRestoreDefaultSettings(UI::EventParams &e);
 	UI::EventReturn OnRenderingMode(UI::EventParams &e);
 	UI::EventReturn OnRenderingBackend(UI::EventParams &e);
+	UI::EventReturn OnRenderingDevice(UI::EventParams &e);
 	UI::EventReturn OnJitAffectingSetting(UI::EventParams &e);
 #ifdef _WIN32
 	UI::EventReturn OnSavePathMydoc(UI::EventParams &e);
@@ -106,7 +108,8 @@ private:
 
 	// Temporaries to convert bools to int settings
 	bool cap60FPS_;
-	int iAlternateSpeedPercent_;
+	int iAlternateSpeedPercent1_;
+	int iAlternateSpeedPercent2_;
 	bool enableReports_;
 
 	//edit the game-specific settings and restore the global settings after exiting
@@ -140,13 +143,13 @@ private:
 class DeveloperToolsScreen : public UIDialogScreenWithBackground {
 public:
 	DeveloperToolsScreen() {}
+	void update() override;
 	void onFinish(DialogResult result) override;
 
 protected:
 	void CreateViews() override;
 
 private:
-	UI::EventReturn OnBack(UI::EventParams &e);
 	UI::EventReturn OnRunCPUTests(UI::EventParams &e);
 	UI::EventReturn OnLoggingChanged(UI::EventParams &e);
 	UI::EventReturn OnLoadLanguageIni(UI::EventParams &e);
@@ -154,6 +157,10 @@ private:
 	UI::EventReturn OnOpenTexturesIniFile(UI::EventParams &e);
 	UI::EventReturn OnLogConfig(UI::EventParams &e);
 	UI::EventReturn OnJitAffectingSetting(UI::EventParams &e);
+	UI::EventReturn OnRemoteDebugger(UI::EventParams &e);
+
+	bool allowDebugger_ = false;
+	bool canAllowDebugger_ = true;
 };
 
 class ProAdhocServerScreen : public UIDialogScreenWithBackground {

@@ -28,6 +28,7 @@ namespace GPUStepping {
 enum PauseAction {
 	PAUSE_CONTINUE,
 	PAUSE_BREAK,
+	PAUSE_GETOUTPUTBUF,
 	PAUSE_GETFRAMEBUF,
 	PAUSE_GETDEPTHBUF,
 	PAUSE_GETSTENCILBUF,
@@ -37,6 +38,7 @@ enum PauseAction {
 };
 
 static bool isStepping;
+static int stepCounter = 0;
 
 static std::mutex pauseLock;
 static std::condition_variable pauseWait;
@@ -66,6 +68,9 @@ static void SetPauseAction(PauseAction act, bool waitComplete = true) {
 	pauseAction = act;
 	pauseLock.unlock();
 
+	if (coreState == CORE_STEPPING && act != PAUSE_CONTINUE)
+		Core_UpdateSingleStep();
+
 	actionComplete = false;
 	pauseWait.notify_all();
 	while (waitComplete && !actionComplete) {
@@ -82,6 +87,10 @@ static void RunPauseAction() {
 		return;
 
 	case PAUSE_BREAK:
+		break;
+
+	case PAUSE_GETOUTPUTBUF:
+		bufferResult = gpuDebug->GetOutputFramebuffer(bufferFrame);
 		break;
 
 	case PAUSE_GETFRAMEBUF:
@@ -117,13 +126,41 @@ static void RunPauseAction() {
 	pauseAction = PAUSE_BREAK;
 }
 
-bool EnterStepping(std::function<void()> callback) {
+bool SingleStep() {
+	std::unique_lock<std::mutex> guard(pauseLock);
+	if (coreState != CORE_RUNNING && coreState != CORE_NEXTFRAME && coreState != CORE_STEPPING) {
+		// Shutting down, don't try to step.
+		actionComplete = true;
+		actionWait.notify_all();
+		return false;
+	}
+	if (!gpuDebug || pauseAction == PAUSE_CONTINUE) {
+		actionComplete = true;
+		actionWait.notify_all();
+		return false;
+	}
+
+	gpuDebug->NotifySteppingEnter();
+	isStepping = true;
+
+	RunPauseAction();
+
+	gpuDebug->NotifySteppingExit();
+	isStepping = false;
+	return true;
+}
+
+bool EnterStepping() {
 	std::unique_lock<std::mutex> guard(pauseLock);
 	if (coreState != CORE_RUNNING && coreState != CORE_NEXTFRAME) {
 		// Shutting down, don't try to step.
+		actionComplete = true;
+		actionWait.notify_all();
 		return false;
 	}
 	if (!gpuDebug) {
+		actionComplete = true;
+		actionWait.notify_all();
 		return false;
 	}
 
@@ -134,8 +171,7 @@ bool EnterStepping(std::function<void()> callback) {
 		pauseAction = PAUSE_BREAK;
 	}
 	isStepping = true;
-
-	callback();
+	stepCounter++;
 
 	do {
 		RunPauseAction();
@@ -151,14 +187,22 @@ bool IsStepping() {
 	return isStepping;
 }
 
+int GetSteppingCounter() {
+	return stepCounter;
+}
+
 static bool GetBuffer(const GPUDebugBuffer *&buffer, PauseAction type, const GPUDebugBuffer &resultBuffer) {
-	if (!isStepping) {
+	if (!isStepping && coreState != CORE_STEPPING) {
 		return false;
 	}
 
 	SetPauseAction(type);
 	buffer = &resultBuffer;
 	return bufferResult;
+}
+
+bool GPU_GetOutputFramebuffer(const GPUDebugBuffer *&buffer) {
+	return GetBuffer(buffer, PAUSE_GETOUTPUTBUF, bufferFrame);
 }
 
 bool GPU_GetCurrentFramebuffer(const GPUDebugBuffer *&buffer, GPUDebugFramebufferType type) {
@@ -184,7 +228,7 @@ bool GPU_GetCurrentClut(const GPUDebugBuffer *&buffer) {
 }
 
 bool GPU_SetCmdValue(u32 op) {
-	if (!isStepping) {
+	if (!isStepping && coreState != CORE_STEPPING) {
 		return false;
 	}
 
@@ -197,12 +241,10 @@ void ResumeFromStepping() {
 	SetPauseAction(PAUSE_CONTINUE, false);
 }
 
-void ForceUnpause(CoreLifecycle stage) {
-	if (stage == CoreLifecycle::STOPPING) {
-		SetPauseAction(PAUSE_CONTINUE, false);
-		actionComplete = true;
-		actionWait.notify_all();
-	}
+void ForceUnpause() {
+	SetPauseAction(PAUSE_CONTINUE, false);
+	actionComplete = true;
+	actionWait.notify_all();
 }
 
 }  // namespace

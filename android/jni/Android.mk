@@ -149,6 +149,7 @@ VULKAN_FILES := \
 SPIRV_CROSS_FILES := \
   $(SRC)/ext/SPIRV-Cross/spirv_cfg.cpp \
   $(SRC)/ext/SPIRV-Cross/spirv_cross.cpp \
+  $(SRC)/ext/SPIRV-Cross/spirv_cross_util.cpp \
   $(SRC)/ext/SPIRV-Cross/spirv_glsl.cpp
 
 EXEC_AND_LIB_FILES := \
@@ -241,6 +242,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/GPU/Common/PostShader.cpp \
   $(SRC)/GPU/Common/ShaderUniforms.cpp \
   $(SRC)/GPU/Debugger/Breakpoints.cpp \
+  $(SRC)/GPU/Debugger/Debugger.cpp \
   $(SRC)/GPU/Debugger/Record.cpp \
   $(SRC)/GPU/Debugger/Stepping.cpp \
   $(SRC)/GPU/GLES/FramebufferManagerGLES.cpp \
@@ -297,8 +299,23 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/Screenshot.cpp \
   $(SRC)/Core/System.cpp \
   $(SRC)/Core/TextureReplacer.cpp \
+  $(SRC)/Core/WebServer.cpp \
   $(SRC)/Core/Debugger/Breakpoints.cpp \
+  $(SRC)/Core/Debugger/DisassemblyManager.cpp \
   $(SRC)/Core/Debugger/SymbolMap.cpp \
+  $(SRC)/Core/Debugger/WebSocket.cpp \
+  $(SRC)/Core/Debugger/WebSocket/BreakpointSubscriber.cpp \
+  $(SRC)/Core/Debugger/WebSocket/CPUCoreSubscriber.cpp \
+  $(SRC)/Core/Debugger/WebSocket/DisasmSubscriber.cpp \
+  $(SRC)/Core/Debugger/WebSocket/GameBroadcaster.cpp \
+  $(SRC)/Core/Debugger/WebSocket/GameSubscriber.cpp \
+  $(SRC)/Core/Debugger/WebSocket/GPUBufferSubscriber.cpp \
+  $(SRC)/Core/Debugger/WebSocket/GPURecordSubscriber.cpp \
+  $(SRC)/Core/Debugger/WebSocket/HLESubscriber.cpp \
+  $(SRC)/Core/Debugger/WebSocket/LogBroadcaster.cpp \
+  $(SRC)/Core/Debugger/WebSocket/SteppingBroadcaster.cpp \
+  $(SRC)/Core/Debugger/WebSocket/SteppingSubscriber.cpp \
+  $(SRC)/Core/Debugger/WebSocket/WebSocketUtils.cpp \
   $(SRC)/Core/Dialog/PSPDialog.cpp \
   $(SRC)/Core/Dialog/PSPGamedataInstallDialog.cpp \
   $(SRC)/Core/Dialog/PSPMsgDialog.cpp \
@@ -370,6 +387,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/HLE/sceSsl.cpp \
   $(SRC)/Core/HLE/sceUmd.cpp \
   $(SRC)/Core/HLE/sceUsb.cpp \
+  $(SRC)/Core/HLE/sceUsbAcc.cpp \
   $(SRC)/Core/HLE/sceUsbCam.cpp \
   $(SRC)/Core/HLE/sceUsbGps.cpp \
   $(SRC)/Core/HLE/sceUtility.cpp \
@@ -408,7 +426,8 @@ LIBARMIPS_FILES := \
   $(SRC)/ext/armips/Archs/ARM/Arm.cpp \
   $(SRC)/ext/armips/Archs/ARM/ArmOpcodes.cpp \
   $(SRC)/ext/armips/Archs/ARM/ArmParser.cpp \
-  $(SRC)/ext/armips/Archs/ARM/ArmRelocator.cpp \
+  $(SRC)/ext/armips/Archs/ARM/ArmElfRelocator.cpp \
+  $(SRC)/ext/armips/Archs/ARM/ArmExpressionFunctions.cpp \
   $(SRC)/ext/armips/Archs/ARM/CArmInstruction.cpp \
   $(SRC)/ext/armips/Archs/ARM/CThumbInstruction.cpp \
   $(SRC)/ext/armips/Archs/ARM/Pool.cpp \
@@ -416,6 +435,8 @@ LIBARMIPS_FILES := \
   $(SRC)/ext/armips/Archs/MIPS/CMipsInstruction.cpp \
   $(SRC)/ext/armips/Archs/MIPS/Mips.cpp \
   $(SRC)/ext/armips/Archs/MIPS/MipsElfFile.cpp \
+  $(SRC)/ext/armips/Archs/MIPS/MipsElfRelocator.cpp \
+  $(SRC)/ext/armips/Archs/MIPS/MipsExpressionFunctions.cpp \
   $(SRC)/ext/armips/Archs/MIPS/MipsMacros.cpp \
   $(SRC)/ext/armips/Archs/MIPS/MipsOpcodes.cpp \
   $(SRC)/ext/armips/Archs/MIPS/MipsParser.cpp \
@@ -467,6 +488,7 @@ LOCAL_SRC_FILES := \
   $(SRC)/android/jni/native_audio.cpp \
   $(SRC)/android/jni/native-audio-so.cpp \
   $(SRC)/UI/BackgroundAudio.cpp \
+  $(SRC)/UI/DiscordIntegration.cpp \
   $(SRC)/UI/DevScreens.cpp \
   $(SRC)/UI/DisplayLayoutEditor.cpp \
   $(SRC)/UI/DisplayLayoutScreen.cpp \

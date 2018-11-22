@@ -15,19 +15,26 @@
 // Official SVN repository and contact information can be found at
 // http://code.google.com/p/dolphin-emu/
 
+// Reference : https://stackoverflow.com/questions/6121792/how-to-check-if-a-cpu-supports-the-sse3-instruction-set
 #if defined(_M_IX86) || defined(_M_X64)
 
+#include "ppsspp_config.h"
 #ifdef __ANDROID__
 #include <sys/stat.h>
 #include <fcntl.h>
+#elif PPSSPP_PLATFORM(MAC)
+#include <sys/sysctl.h>
 #endif
 
 #include <memory.h>
+#include <set>
 #include "base/logging.h"
 #include "base/basictypes.h"
+#include "file/file_util.h"
 
 #include "Common.h"
 #include "CPUDetect.h"
+#include "FileUtil.h"
 #include "StringUtils.h"
 
 #if defined(_WIN32) && !defined(__MINGW32__)
@@ -95,6 +102,28 @@ CPUInfo cpu_info;
 
 CPUInfo::CPUInfo() {
 	Detect();
+}
+
+static std::vector<int> ParseCPUList(const std::string &filename) {
+	std::string data;
+	std::vector<int> results;
+
+	if (readFileToString(true, filename.c_str(), data)) {
+		std::vector<std::string> ranges;
+		SplitString(data, ',', ranges);
+		for (auto range : ranges) {
+			int low = 0, high = 0;
+			int parts = sscanf(range.c_str(), "%d-%d", &low, &high);
+			if (parts == 1) {
+				high = low;
+			}
+			for (int i = low; i <= high; ++i) {
+				results.push_back(i);
+			}
+		}
+	}
+
+	return results;
 }
 
 // Detects the various cpu features
@@ -170,7 +199,7 @@ void CPUInfo::Detect() {
 		if ((cpu_id[2] >> 28) & 1) {
 			bAVX = true;
 			if ((cpu_id[2] >> 12) & 1)
-				bFMA = true;
+				bFMA3 = true;
 		}
 		if ((cpu_id[2] >> 25) & 1) bAES = true;
 
@@ -191,10 +220,15 @@ void CPUInfo::Detect() {
 			{
 				bAVX = true;
 				if ((cpu_id[2] >> 12) & 1)
-					bFMA = true;
+					bFMA3 = true;
 			}
 		}
 
+
+		// TSX support require check:
+		// -- Is the RTM bit set in CPUID? (>>11)
+		// -- No need to check HLE bit because legacy processors ignore HLE hints
+		// -- See https://software.intel.com/en-us/articles/how-to-detect-new-instruction-support-in-the-4th-generation-intel-core-processor-family
 		if (max_std_fn >= 7)
 		{
 			do_cpuid(cpu_id, 0x00000007);
@@ -205,6 +239,10 @@ void CPUInfo::Detect() {
 				bBMI1 = true;
 			if ((cpu_id[1] >> 8) & 1)
 				bBMI2 = true;
+			if ((cpu_id[1] >> 29) & 1)
+				bSHA = true;
+			if ((cpu_id[1] >> 11) & 1)
+				bRTM = true;
 		}
 	}
 	if (max_ex_fn >= 0x80000004) {
@@ -220,6 +258,9 @@ void CPUInfo::Detect() {
 		// Check for more features.
 		do_cpuid(cpu_id, 0x80000001);
 		if (cpu_id[2] & 1) bLAHFSAHF64 = true;
+		if ((cpu_id[2] >> 6) & 1) bSSE4A = true;
+		if ((cpu_id[2] >> 16) & 1) bFMA4 = true;
+		if ((cpu_id[2] >> 11) & 1) bXOP = true;
 		// CmpLegacy (bit 2) is deprecated.
 		if ((cpu_id[3] >> 29) & 1) bLongMode = true;
 	}
@@ -260,6 +301,103 @@ void CPUInfo::Detect() {
 			num_cores = (cpu_id[2] & 0xFF) + 1;
 		}
 	}
+
+	// The above only gets valid info for the active processor.
+	// Let's rely on OS APIs for accurate information, if available, below.
+
+#if PPSSPP_PLATFORM(WINDOWS)
+#if !PPSSPP_PLATFORM(UWP)
+	typedef BOOL (WINAPI *getLogicalProcessorInformationEx_f)(LOGICAL_PROCESSOR_RELATIONSHIP RelationshipType, PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX Buffer, PDWORD ReturnedLength);
+	auto getLogicalProcessorInformationEx = (getLogicalProcessorInformationEx_f)GetProcAddress(GetModuleHandle(L"kernel32.dll"), "GetLogicalProcessorInformationEx");
+#else
+	void *getLogicalProcessorInformationEx = nullptr;
+#endif
+
+	if (getLogicalProcessorInformationEx) {
+#if !PPSSPP_PLATFORM(UWP)
+		DWORD len = 0;
+		getLogicalProcessorInformationEx(RelationAll, nullptr, &len);
+		auto processors = new uint8_t[len];
+		if (getLogicalProcessorInformationEx(RelationAll, (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)processors, &len)) {
+			num_cores = 0;
+			logical_cpu_count = 0;
+			auto p = processors;
+			while (p < processors + len) {
+				const auto &processor = *(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)p;
+				if (processor.Relationship == RelationProcessorCore) {
+					num_cores++;
+					for (int j = 0; j < processor.Processor.GroupCount; ++j) {
+						const auto &mask = processor.Processor.GroupMask[j].Mask;
+						for (int i = 0; i < sizeof(mask) * 8; ++i) {
+							logical_cpu_count += (mask >> i) & 1;
+						}
+					}
+				}
+				p += processor.Size;
+			}
+		}
+		delete [] processors;
+#endif
+	} else {
+		DWORD len = 0;
+		const DWORD sz = sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+		GetLogicalProcessorInformation(nullptr, &len);
+		std::vector<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> processors;
+		processors.resize((len + sz - 1) / sz);
+		if (GetLogicalProcessorInformation(&processors[0], &len)) {
+			num_cores = 0;
+			logical_cpu_count = 0;
+			for (auto processor : processors) {
+				if (processor.Relationship == RelationProcessorCore) {
+					num_cores++;
+					for (int i = 0; i < sizeof(processor.ProcessorMask) * 8; ++i) {
+						logical_cpu_count += (processor.ProcessorMask >> i) & 1;
+					}
+				}
+			}
+		}
+	}
+
+	// This seems to be the count per core.  Hopefully all cores are the same, but we counted each above.
+	logical_cpu_count /= num_cores;
+#elif PPSSPP_PLATFORM(LINUX)
+	if (File::Exists("/sys/devices/system/cpu/present")) {
+		// This may not count unplugged cores, but at least it's a best guess.
+		// Also, this assumes the CPU cores are heterogeneous (e.g. all cores could be active simultaneously.)
+		num_cores = 0;
+		logical_cpu_count = 0;
+
+		std::set<int> counted_cores;
+		auto present = ParseCPUList("/sys/devices/system/cpu/present");
+		for (int id : present) {
+			logical_cpu_count++;
+
+			if (counted_cores.count(id) == 0) {
+				num_cores++;
+				counted_cores.insert(id);
+
+				// Also count any thread siblings as counted.
+				auto threads = ParseCPUList(StringFromFormat("/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", id));
+				for (int mark_id : threads) {
+					counted_cores.insert(mark_id);
+				}
+			}
+		}
+	}
+
+	// This seems to be the count per core.  Hopefully all cores are the same, but we counted each above.
+	logical_cpu_count /= num_cores;
+#elif PPSSPP_PLATFORM(MAC)
+	int num = 0;
+	size_t sz = sizeof(num);
+	if (sysctlbyname("hw.physicalcpu_max", &num, &sz, nullptr, 0) == 0) {
+		num_cores = num;
+		sz = sizeof(num);
+		if (sysctlbyname("hw.logicalcpu_max", &num, &sz, nullptr, 0) == 0) {
+			logical_cpu_count = num / num_cores;
+		}
+	}
+#endif
 }
 
 // Turn the cpu info into a string we can show
@@ -279,10 +417,16 @@ std::string CPUInfo::Summarize()
 	if (bSSSE3) sum += ", SSSE3";
 	if (bSSE4_1) sum += ", SSE4.1";
 	if (bSSE4_2) sum += ", SSE4.2";
+	if (bSSE4A) sum += ", SSE4A";
 	if (HTT) sum += ", HTT";
 	if (bAVX) sum += ", AVX";
-	if (bFMA) sum += ", FMA";
+	if (bAVX2) sum += ", AVX2";
+	if (bFMA3) sum += ", FMA3";
+	if (bFMA4) sum += ", FMA4";
 	if (bAES) sum += ", AES";
+	if (bSHA) sum += ", SHA";
+	if (bXOP) sum += ", XOP";
+	if (bRTM) sum += ", TSX";
 	if (bLongMode) sum += ", 64-bit support";
 	return sum;
 }

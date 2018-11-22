@@ -20,7 +20,6 @@
 #include "Common/ColorConv.h"
 #include "Common/MemoryUtil.h"
 #include "Core/Config.h"
-#include "Core/Host.h"
 #include "Core/Reporting.h"
 #include "Core/System.h"
 #include "GPU/Common/FramebufferCommon.h"
@@ -28,6 +27,7 @@
 #include "GPU/Common/TextureDecoder.h"
 #include "GPU/Common/ShaderId.h"
 #include "GPU/Common/GPUStateUtils.h"
+#include "GPU/Debugger/Debugger.h"
 #include "GPU/GPUState.h"
 #include "GPU/GPUInterface.h"
 
@@ -257,6 +257,19 @@ void TextureCacheCommon::UpdateSamplingParams(TexCacheEntry &entry, SamplerCache
 void TextureCacheCommon::UpdateMaxSeenV(TexCacheEntry *entry, bool throughMode) {
 	// If the texture is >= 512 pixels tall...
 	if (entry->dim >= 0x900) {
+		if (entry->cluthash != 0 && entry->maxSeenV == 0) {
+			const u64 cachekeyMin = (u64)(entry->addr & 0x3FFFFFFF) << 32;
+			const u64 cachekeyMax = cachekeyMin + (1ULL << 32);
+			for (auto it = cache_.lower_bound(cachekeyMin), end = cache_.upper_bound(cachekeyMax); it != end; ++it) {
+				// They should all be the same, just make sure we take any that has already increased.
+				// This is for a new texture.
+				if (it->second->maxSeenV != 0) {
+					entry->maxSeenV = it->second->maxSeenV;
+					break;
+				}
+			}
+		}
+
 		// Texture scale/offset and gen modes don't apply in through.
 		// So we can optimize how much of the texture we look at.
 		if (throughMode) {
@@ -273,6 +286,16 @@ void TextureCacheCommon::UpdateMaxSeenV(TexCacheEntry *entry, bool throughMode) 
 			// Can't tell how much is used.
 			// TODO: We could tell for texcoord UV gen, and apply scale to max?
 			entry->maxSeenV = 512;
+		}
+
+		// We need to keep all CLUT variants in sync so we detect changes properly.
+		// See HandleTextureChange / STATUS_CLUT_RECHECK.
+		if (entry->cluthash != 0) {
+			const u64 cachekeyMin = (u64)(entry->addr & 0x3FFFFFFF) << 32;
+			const u64 cachekeyMax = cachekeyMin + (1ULL << 32);
+			for (auto it = cache_.lower_bound(cachekeyMin), end = cache_.upper_bound(cachekeyMax); it != end; ++it) {
+				it->second->maxSeenV = entry->maxSeenV;
+			}
 		}
 	}
 }
@@ -612,9 +635,10 @@ void TextureCacheCommon::HandleTextureChange(TexCacheEntry *const entry, const c
 }
 
 void TextureCacheCommon::NotifyFramebuffer(u32 address, VirtualFramebuffer *framebuffer, FramebufferNotification msg) {
-	// Must be in VRAM so | 0x04000000 it is.  Also, ignore memory mirrors.
+	// Mask to ignore the Z memory mirrors if the address is in VRAM.
 	// These checks are mainly to reduce scanning all textures.
-	const u32 addr = (address | 0x04000000) & 0x3F9FFFFF;
+	const u32 mirrorMask = 0x00600000;
+	const u32 addr = Memory::IsVRAMAddress(address) ? (address & ~mirrorMask) : address;
 	const u32 bpp = framebuffer->format == GE_FORMAT_8888 ? 4 : 2;
 	const u64 cacheKey = (u64)addr << 32;
 	// If it has a clut, those are the low 32 bits, so it'll be inside this range.
@@ -685,7 +709,7 @@ void TextureCacheCommon::AttachFramebufferValid(TexCacheEntry *entry, VirtualFra
 		entry->maxLevel = 0;
 		fbTexInfo_[cachekey] = fbInfo;
 		framebuffer->last_frame_attached = gpuStats.numFlips;
-		host->GPUNotifyTextureAttachment(entry->addr);
+		GPUDebug::NotifyTextureAttachment(entry->addr);
 	} else if (entry->framebuffer == framebuffer) {
 		framebuffer->last_frame_attached = gpuStats.numFlips;
 	}
@@ -704,7 +728,7 @@ void TextureCacheCommon::AttachFramebufferInvalid(TexCacheEntry *entry, VirtualF
 		entry->status &= ~TexCacheEntry::STATUS_DEPALETTIZE;
 		entry->maxLevel = 0;
 		fbTexInfo_[cachekey] = fbInfo;
-		host->GPUNotifyTextureAttachment(entry->addr);
+		GPUDebug::NotifyTextureAttachment(entry->addr);
 	}
 }
 
@@ -713,8 +737,11 @@ void TextureCacheCommon::DetachFramebuffer(TexCacheEntry *entry, u32 address, Vi
 		const u64 cachekey = entry->CacheKey();
 		cacheSizeEstimate_ += EstimateTexMemoryUsage(entry);
 		entry->framebuffer = nullptr;
+		// Force the hash to change in case we had one before.
+		// Otherwise we never recreate the texture.
+		entry->hash ^= 1;
 		fbTexInfo_.erase(cachekey);
-		host->GPUNotifyTextureAttachment(entry->addr);
+		GPUDebug::NotifyTextureAttachment(entry->addr);
 	}
 }
 
@@ -723,10 +750,13 @@ bool TextureCacheCommon::AttachFramebuffer(TexCacheEntry *entry, u32 address, Vi
 
 	AttachedFramebufferInfo fbInfo = { 0 };
 
-	const u64 mirrorMask = 0x00600000;
-	// Must be in VRAM so | 0x04000000 it is.  Also, ignore memory mirrors.
-	const u32 addr = (address | 0x04000000) & 0x3FFFFFFF & ~mirrorMask;
-	const u32 texaddr = ((entry->addr + texaddrOffset) & ~mirrorMask);
+	const u32 mirrorMask = 0x00600000;
+	u32 addr = address & 0x3FFFFFFF;
+	u32 texaddr = entry->addr + texaddrOffset;
+	if (entry->addr & 0x04000000) {
+		addr &= ~mirrorMask;
+		texaddr &= ~mirrorMask;
+	}
 	const bool noOffset = texaddr == addr;
 	const bool exactMatch = noOffset && entry->format < 4;
 	const u32 w = 1 << ((entry->dim >> 0) & 0xf);
@@ -964,7 +994,7 @@ void TextureCacheCommon::LoadClut(u32 clutAddr, u32 loadBytes) {
 			clutRenderOffset_ = MAX_CLUT_OFFSET;
 			for (size_t i = 0, n = fbCache_.size(); i < n; ++i) {
 				auto framebuffer = fbCache_[i];
-				const u32 fb_address = framebuffer->fb_address | 0x04000000;
+				const u32 fb_address = framebuffer->fb_address & 0x3FFFFFFF;
 				const u32 bpp = framebuffer->drawnFormat == GE_FORMAT_8888 ? 4 : 2;
 				u32 offset = clutFramebufAddr - fb_address;
 

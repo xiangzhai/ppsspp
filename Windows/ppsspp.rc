@@ -79,7 +79,7 @@ BEGIN
     "1",            ID_OPTIONS_RESOLUTIONDUMMY,    VIRTKEY, CONTROL, NOINVERT
     VK_F7,          ID_OPTIONS_FRAMESKIPDUMMY, VIRTKEY, NOINVERT
     VK_F12,         ID_DEBUG_TAKESCREENSHOT,  VIRTKEY, NOINVERT
-    VK_F8,          ID_TOGGLE_PAUSE,        VIRTKEY, NOINVERT
+    VK_F8,          ID_TOGGLE_BREAK,        VIRTKEY, NOINVERT
     VK_RETURN,      ID_OPTIONS_FULLSCREEN,  ALT, VIRTKEY, NOINVERT
     VK_F11,         ID_OPTIONS_FULLSCREEN,  VIRTKEY, NOINVERT
 END
@@ -94,7 +94,7 @@ BEGIN
     "2",            ID_DEBUG_DISPLAYBREAKPOINTLIST,    VIRTKEY, CONTROL, NOINVERT
     "3",            ID_DEBUG_DISPLAYTHREADLIST,        VIRTKEY, CONTROL, NOINVERT
     "4",            ID_DEBUG_DISPLAYSTACKFRAMELIST,    VIRTKEY, CONTROL, NOINVERT
-    VK_F7,          ID_TOGGLE_PAUSE,                   VIRTKEY, NOINVERT
+    VK_F7,          ID_TOGGLE_BREAK,                   VIRTKEY, NOINVERT
     VK_F8,          ID_DEBUG_STEPOUT,                  VIRTKEY, NOINVERT
     VK_F9,          ID_DEBUG_RUNTOLINE,                VIRTKEY, NOINVERT
     VK_F10,         ID_DEBUG_STEPOVER,                 VIRTKEY, NOINVERT
@@ -179,13 +179,13 @@ FONT 8, "MS Shell Dlg", 0, 0, 0x1
 BEGIN
     LTEXT           "Ctr:",IDC_STATIC,6,2,12,8
     EDITTEXT        IDC_DEBUG_COUNT,30,2,39,12,ES_UPPERCASE | ES_AUTOHSCROLL | ES_READONLY | NOT WS_BORDER
-    PUSHBUTTON      "Stop",IDC_STOPGO,111,0,24,14
-    PUSHBUTTON      "Step Into",IDC_STEP,143,0,39,14
-    PUSHBUTTON      "Step Over",IDC_STEPOVER,183,0,40,14
-    PUSHBUTTON      "Step Out",IDC_STEPOUT,224,0,40,14
-    PUSHBUTTON      "Next HLE",IDC_STEPHLE,272,0,40,14
-    PUSHBUTTON      "Breakpoint",IDC_MEMCHECK,313,0,45,14
-    EDITTEXT        IDC_THREADNAME,366,3,150,10,ES_AUTOHSCROLL | ES_READONLY | NOT WS_BORDER
+    PUSHBUTTON      "Break",IDC_STOPGO,111,0,28,14
+    PUSHBUTTON      "Step Into",IDC_STEP,147,0,39,14
+    PUSHBUTTON      "Step Over",IDC_STEPOVER,187,0,40,14
+    PUSHBUTTON      "Step Out",IDC_STEPOUT,228,0,40,14
+    PUSHBUTTON      "Next HLE",IDC_STEPHLE,276,0,40,14
+    PUSHBUTTON      "Breakpoint",IDC_MEMCHECK,317,0,45,14
+    EDITTEXT        IDC_THREADNAME,370,3,150,10,ES_AUTOHSCROLL | ES_READONLY | NOT WS_BORDER
     EDITTEXT        IDC_ADDRESS,11,24,91,13,ES_AUTOHSCROLL | ES_WANTRETURN
     PUSHBUTTON      "PC",IDC_GOTOPC,11,40,15,13
     PUSHBUTTON      "RA",IDC_GOTOLR,28,40,14,13
@@ -214,8 +214,9 @@ BEGIN
     PUSHBUTTON      "Step &Tex",IDC_GEDBG_STEPTEX,62,2,48,14
     PUSHBUTTON      "Step &Draw",IDC_GEDBG_STEPDRAW,114,2,48,14
     PUSHBUTTON      "Step &Prim",IDC_GEDBG_STEPPRIM,166,2,48,14
-    PUSHBUTTON      "Step &Into",IDC_GEDBG_STEP,218,2,48,14
-    PUSHBUTTON      "&Resume",IDC_GEDBG_RESUME,270,2,48,14
+    PUSHBUTTON      "Step &Curve",IDC_GEDBG_STEPCURVE,218,2,48,14
+    PUSHBUTTON      "Step &Into",IDC_GEDBG_STEP,270,2,48,14
+    PUSHBUTTON      "&Resume",IDC_GEDBG_RESUME,322,2,48,14
     PUSHBUTTON      "Rec&ord",IDC_GEDBG_RECORD,440,2,48,14
     CONTROL         "",IDC_GEDBG_TEX,"SimpleGLWindow",WS_CHILD | WS_VISIBLE,10,20,128,128
     CONTROL         "",IDC_GEDBG_FRAME,"SimpleGLWindow",WS_CHILD | WS_VISIBLE,148,20,256,136
@@ -303,6 +304,7 @@ BEGIN
     CONTROL         "Normal",IDC_MODENORMAL,"Button",BS_AUTORADIOBUTTON | WS_GROUP,248,9,40,9
     CONTROL         "Symbols",IDC_MODESYMBOLS,"Button",BS_AUTORADIOBUTTON,291,9,43,8
     GROUPBOX        "Mode",IDC_STATIC,241,0,104,22
+    AUTOCHECKBOX  "Show Offsets",IDC_SHOWOFFSETS,365,9,55,8
     COMBOBOX        IDC_REGIONS,87,5,88,139,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 END
 
@@ -483,7 +485,7 @@ BEGIN
 
     POPUP "Emulation"
     BEGIN
-        MENUITEM "Run",                                     ID_TOGGLE_PAUSE
+        MENUITEM "Pause",                                   ID_EMULATION_PAUSE
         MENUITEM "Stop",                                    ID_EMULATION_STOP
         MENUITEM "Reset",                                   ID_EMULATION_RESET
         MENUITEM "Switch UMD",                              ID_EMULATION_SWITCH_UMD
@@ -498,18 +500,19 @@ BEGIN
 
     POPUP "Debug"
     BEGIN
+        MENUITEM "Run",                                     ID_TOGGLE_BREAK
+        MENUITEM "Break on Load",                           ID_DEBUG_BREAKONLOAD
+        MENUITEM "Ignore Illegal Reads/Writes",             ID_DEBUG_IGNOREILLEGALREADS
+        MENUITEM SEPARATOR
         MENUITEM "Load Map File...",                        ID_DEBUG_LOADMAPFILE
         MENUITEM "Save Map File...",                        ID_DEBUG_SAVEMAPFILE
         MENUITEM "Load .sym File...",                       ID_DEBUG_LOADSYMFILE
         MENUITEM "Save .sym File...",                       ID_DEBUG_SAVESYMFILE
         MENUITEM "Reset Symbol Table",                      ID_DEBUG_RESETSYMBOLTABLE
         MENUITEM SEPARATOR
-        MENUITEM "Dump Next Frame to Log",                  ID_DEBUG_DUMPNEXTFRAME
         MENUITEM "Take Screenshot",                         ID_DEBUG_TAKESCREENSHOT
-        MENUITEM SEPARATOR
+        MENUITEM "Dump Next Frame to Log",                  ID_DEBUG_DUMPNEXTFRAME
         MENUITEM "Show Debug Statistics",                   ID_DEBUG_SHOWDEBUGSTATISTICS
-        MENUITEM "Ignore Illegal Reads/Writes",             ID_DEBUG_IGNOREILLEGALREADS
-        MENUITEM "Run on Load",                             ID_DEBUG_RUNONLOAD
         MENUITEM SEPARATOR
         MENUITEM "Disassembly",                             ID_DEBUG_DISASSEMBLY
         MENUITEM "GE Debugger...",                          ID_DEBUG_GEDEBUGGER
@@ -585,6 +588,11 @@ BEGIN
             MENUITEM "&6",                                  ID_OPTIONS_FRAMESKIP_6
             MENUITEM "&7",                                  ID_OPTIONS_FRAMESKIP_7
             MENUITEM "&8",                                  ID_OPTIONS_FRAMESKIP_8
+        END
+        POPUP "Frame Skipping Type"
+        BEGIN
+            MENUITEM "Skip Number of Frames",               ID_OPTIONS_FRAMESKIPTYPE_COUNT
+            MENUITEM "Skip Percent of FPS",                 ID_OPTIONS_FRAMESKIPTYPE_PRCNT
         END
         POPUP "Texture Filtering"
         BEGIN

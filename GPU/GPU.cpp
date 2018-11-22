@@ -17,6 +17,7 @@
 
 #include "ppsspp_config.h"
 
+#include "base/timeutil.h"
 #include "Common/GraphicsContext.h"
 #include "Core/Core.h"
 
@@ -28,9 +29,7 @@
 #else
 #include "GPU/GLES/GPU_GLES.h"
 
-#ifndef NO_VULKAN
 #include "GPU/Vulkan/GPU_Vulkan.h"
-#endif
 #include "GPU/Null/NullGpu.h"
 #include "GPU/Software/SoftGpu.h"
 
@@ -62,6 +61,7 @@ bool GPU_IsReady() {
 }
 
 bool GPU_Init(GraphicsContext *ctx, Draw::DrawContext *draw) {
+	_assert_(draw);
 #if PPSSPP_PLATFORM(UWP)
 	SetGPU(new GPU_D3D11(ctx, draw));
 	return true;
@@ -91,13 +91,11 @@ bool GPU_Init(GraphicsContext *ctx, Draw::DrawContext *draw) {
 		return false;
 #endif
 	case GPUCORE_VULKAN:
-#ifndef NO_VULKAN
 		if (!ctx) {
 			ERROR_LOG(G3D, "Unable to init Vulkan GPU backend, no context");
 			break;
 		}
 		SetGPU(new GPU_Vulkan(ctx, draw));
-#endif
 		break;
 	}
 
@@ -109,7 +107,14 @@ bool GPU_Init(GraphicsContext *ctx, Draw::DrawContext *draw) {
 #endif
 
 void GPU_Shutdown() {
+	// Wait for IsReady, since it might be running on a thread.
+	if (gpu) {
+		gpu->CancelReady();
+		while (!gpu->IsReady()) {
+			sleep_ms(10);
+		}
+	}
 	delete gpu;
 	gpu = nullptr;
-	gpuDebug = 0;
+	gpuDebug = nullptr;
 }

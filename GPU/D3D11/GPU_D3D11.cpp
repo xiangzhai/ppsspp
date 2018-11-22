@@ -45,7 +45,6 @@
 #include "Core/Debugger/Breakpoints.h"
 #include "Core/MemMapHelpers.h"
 #include "Core/MIPS/MIPS.h"
-#include "Core/Host.h"
 #include "Core/Config.h"
 #include "Core/Reporting.h"
 #include "Core/System.h"
@@ -55,6 +54,7 @@
 #include "GPU/GeDisasm.h"
 
 #include "GPU/Common/FramebufferCommon.h"
+#include "GPU/Debugger/Debugger.h"
 #include "GPU/D3D11/ShaderManagerD3D11.h"
 #include "GPU/D3D11/GPU_D3D11.h"
 #include "GPU/D3D11/FramebufferManagerD3D11.h"
@@ -127,6 +127,7 @@ GPU_D3D11::~GPU_D3D11() {
 void GPU_D3D11::CheckGPUFeatures() {
 	u32 features = 0;
 
+	features |= GPU_SUPPORTS_VS_RANGE_CULLING;
 	features |= GPU_SUPPORTS_BLEND_MINMAX;
 	features |= GPU_PREFER_CPU_DOWNLOAD;
 
@@ -146,6 +147,8 @@ void GPU_D3D11::CheckGPUFeatures() {
 	features |= GPU_SUPPORTS_LARGE_VIEWPORTS;
 	if (draw_->GetDeviceCaps().dualSourceBlend)
 		features |= GPU_SUPPORTS_DUALSOURCE_BLEND;
+	if (draw_->GetDeviceCaps().depthClampSupported)
+		features |= GPU_SUPPORTS_DEPTH_CLAMP;
 	features |= GPU_SUPPORTS_ANY_COPY_IMAGE;
 	features |= GPU_SUPPORTS_TEXTURE_FLOAT;
 	features |= GPU_SUPPORTS_INSTANCE_RENDERING;
@@ -254,7 +257,7 @@ void GPU_D3D11::BeginFrame() {
 void GPU_D3D11::SetDisplayFramebuffer(u32 framebuf, u32 stride, GEBufferFormat format) {
 	// TODO: Some games like Spongebob - Yellow Avenger, never change framebuffer, they blit to it.
 	// So breaking on frames doesn't work. Might want to move this to sceDisplay vsync.
-	host->GPUNotifyDisplay(framebuf, stride, format);
+	GPUDebug::NotifyDisplay(framebuf, stride, format);
 	framebufferManagerD3D11_->SetDisplayFramebuffer(framebuf, stride, format);
 }
 
@@ -280,7 +283,7 @@ void GPU_D3D11::FinishDeferred() {
 
 inline void GPU_D3D11::CheckFlushOp(int cmd, u32 diff) {
 	const u8 cmdFlags = cmdInfo_[cmd].flags;
-	if ((cmdFlags & FLAG_FLUSHBEFORE) || (diff && (cmdFlags & FLAG_FLUSHBEFOREONCHANGE))) {
+	if (diff && (cmdFlags & FLAG_FLUSHBEFOREONCHANGE)) {
 		if (dumpThisFrame_) {
 			NOTICE_LOG(G3D, "================ FLUSH ================");
 		}

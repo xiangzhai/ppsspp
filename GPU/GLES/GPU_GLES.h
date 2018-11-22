@@ -39,6 +39,7 @@ public:
 	void CheckGPUFeatures() override;
 
 	bool IsReady() override;
+	void CancelReady() override;
 
 	void PreExecuteOp(u32 op, u32 diff) override;
 	void ExecuteOp(u32 op, u32 diff) override;
@@ -92,5 +93,4 @@ private:
 #ifdef _WIN32
 	int lastVsync_;
 #endif
-	int vertexCost_ = 0;
 };

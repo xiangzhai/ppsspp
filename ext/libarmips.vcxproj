@@ -30,7 +30,8 @@
     <ProjectGuid>{129E5E2B-39C1-4D84-96FE-DFD22DBB4A25}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>libarmips</RootNamespace>
-    <WindowsTargetPlatformVersion></WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>
+    </WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -135,9 +136,9 @@
       <PreprocessorDefinitions>_CRTDBG_MAP_ALLOC;WIN32;_DEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <AdditionalIncludeDirectories>armips</AdditionalIncludeDirectories>
-      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -155,9 +156,9 @@
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <AdditionalIncludeDirectories>armips</AdditionalIncludeDirectories>
       <OmitFramePointers>false</OmitFramePointers>
-      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <ForcedIncludeFiles>
       </ForcedIncludeFiles>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -203,6 +204,8 @@
       <PreprocessorDefinitions>WIN32;NDEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <AdditionalIncludeDirectories>armips</AdditionalIncludeDirectories>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -223,6 +226,8 @@
       <AdditionalIncludeDirectories>armips</AdditionalIncludeDirectories>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <StringPooling>true</StringPooling>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <OmitFramePointers>false</OmitFramePointers>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -234,9 +239,10 @@
   <ItemGroup>
     <ClCompile Include="armips\Archs\Architecture.cpp" />
     <ClCompile Include="armips\Archs\ARM\Arm.cpp" />
+    <ClCompile Include="armips\Archs\ARM\ArmElfRelocator.cpp" />
+    <ClCompile Include="armips\Archs\ARM\ArmExpressionFunctions.cpp" />
     <ClCompile Include="armips\Archs\ARM\ArmOpcodes.cpp" />
     <ClCompile Include="armips\Archs\ARM\ArmParser.cpp" />
-    <ClCompile Include="armips\Archs\ARM\ArmRelocator.cpp" />
     <ClCompile Include="armips\Archs\ARM\CArmInstruction.cpp" />
     <ClCompile Include="armips\Archs\ARM\CThumbInstruction.cpp" />
     <ClCompile Include="armips\Archs\ARM\Pool.cpp" />
@@ -244,6 +250,8 @@
     <ClCompile Include="armips\Archs\MIPS\CMipsInstruction.cpp" />
     <ClCompile Include="armips\Archs\MIPS\Mips.cpp" />
     <ClCompile Include="armips\Archs\MIPS\MipsElfFile.cpp" />
+    <ClCompile Include="armips\Archs\MIPS\MipsElfRelocator.cpp" />
+    <ClCompile Include="armips\Archs\MIPS\MipsExpressionFunctions.cpp" />
     <ClCompile Include="armips\Archs\MIPS\MipsMacros.cpp" />
     <ClCompile Include="armips\Archs\MIPS\MipsOpcodes.cpp" />
     <ClCompile Include="armips\Archs\MIPS\MipsParser.cpp" />
@@ -287,9 +295,10 @@
   <ItemGroup>
     <ClInclude Include="armips\Archs\Architecture.h" />
     <ClInclude Include="armips\Archs\ARM\Arm.h" />
+    <ClInclude Include="armips\Archs\ARM\ArmElfRelocator.h" />
+    <ClInclude Include="armips\Archs\ARM\ArmExpressionFunctions.h" />
     <ClInclude Include="armips\Archs\ARM\ArmOpcodes.h" />
     <ClInclude Include="armips\Archs\ARM\ArmParser.h" />
-    <ClInclude Include="armips\Archs\ARM\ArmRelocator.h" />
     <ClInclude Include="armips\Archs\ARM\CArmInstruction.h" />
     <ClInclude Include="armips\Archs\ARM\CThumbInstruction.h" />
     <ClInclude Include="armips\Archs\ARM\Pool.h" />
@@ -297,6 +306,8 @@
     <ClInclude Include="armips\Archs\MIPS\CMipsInstruction.h" />
     <ClInclude Include="armips\Archs\MIPS\Mips.h" />
     <ClInclude Include="armips\Archs\MIPS\MipsElfFile.h" />
+    <ClInclude Include="armips\Archs\MIPS\MipsElfRelocator.h" />
+    <ClInclude Include="armips\Archs\MIPS\MipsExpressionFunctions.h" />
     <ClInclude Include="armips\Archs\MIPS\MipsMacros.h" />
     <ClInclude Include="armips\Archs\MIPS\MipsOpcodes.h" />
     <ClInclude Include="armips\Archs\MIPS\MipsParser.h" />

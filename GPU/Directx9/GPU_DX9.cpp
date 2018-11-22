@@ -28,6 +28,7 @@
 #include "Core/MIPS/MIPS.h"
 #include "Core/Host.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/Reporting.h"
 #include "Core/System.h"
 
@@ -38,6 +39,7 @@
 #include "GPU/GeDisasm.h"
 
 #include "GPU/Common/FramebufferCommon.h"
+#include "GPU/Debugger/Debugger.h"
 #include "GPU/Directx9/ShaderManagerDX9.h"
 #include "GPU/Directx9/GPU_DX9.h"
 #include "GPU/Directx9/FramebufferDX9.h"
@@ -106,7 +108,6 @@ GPU_DX9::GPU_DX9(GraphicsContext *gfxCtx, Draw::DrawContext *draw)
 
 void GPU_DX9::CheckGPUFeatures() {
 	u32 features = 0;
-
 	features |= GPU_SUPPORTS_16BIT_FORMATS;
 	features |= GPU_SUPPORTS_BLEND_MINMAX;
 	features |= GPU_SUPPORTS_TEXTURE_LOD_CONTROL;
@@ -116,6 +117,11 @@ void GPU_DX9::CheckGPUFeatures() {
 	// Accurate depth is required on AMD/nVidia (for reverse Z) so we ignore the compat flag to disable it on those. See #9545
 	if (!PSP_CoreParameter().compat.flags().DisableAccurateDepth || vendor == Draw::GPUVendor::VENDOR_AMD || vendor == Draw::GPUVendor::VENDOR_NVIDIA) {
 		features |= GPU_SUPPORTS_ACCURATE_DEPTH;
+	}
+
+	// VS range culling causes problems on Intel.
+	if (vendor != Draw::GPUVendor::VENDOR_INTEL) {
+		features |= GPU_SUPPORTS_VS_RANGE_CULLING;
 	}
 
 	D3DCAPS9 caps;
@@ -210,7 +216,7 @@ void GPU_DX9::ReapplyGfxState() {
 void GPU_DX9::BeginFrame() {
 	// Turn off vsync when unthrottled
 	int desiredVSyncInterval = g_Config.bVSync ? 1 : 0;
-	if ((PSP_CoreParameter().unthrottle) || (PSP_CoreParameter().fpsLimit == 1))
+	if (PSP_CoreParameter().unthrottle || PSP_CoreParameter().fpsLimit != FPSLimit::NORMAL)
 		desiredVSyncInterval = 0;
 	if (desiredVSyncInterval != lastVsync_) {
 		dxstate.SetVSyncInterval(desiredVSyncInterval);
@@ -229,7 +235,7 @@ void GPU_DX9::BeginFrame() {
 }
 
 void GPU_DX9::SetDisplayFramebuffer(u32 framebuf, u32 stride, GEBufferFormat format) {
-	host->GPUNotifyDisplay(framebuf, stride, format);
+	GPUDebug::NotifyDisplay(framebuf, stride, format);
 	framebufferManagerDX9_->SetDisplayFramebuffer(framebuf, stride, format);
 }
 

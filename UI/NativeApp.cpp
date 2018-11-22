@@ -29,16 +29,13 @@
 // in NativeShutdown.
 
 #include <locale.h>
-// Linux doesn't like using std::find with std::vector<int> without this :/
-#if !defined(MOBILE_DEVICE)
 #include <algorithm>
-#endif
 #include <memory>
-#include <thread>
 #include <mutex>
+#include <thread>
 
 #if defined(_WIN32)
-#include "Windows/DSoundStream.h"
+#include "Windows/WindowsAudio.h"
 #include "Windows/MainWindow.h"
 #endif
 
@@ -71,6 +68,7 @@
 #include "Common/MemArena.h"
 #include "Common/GraphicsContext.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/Core.h"
 #include "Core/FileLoaders/DiskCachingFileLoader.h"
 #include "Core/Host.h"
@@ -84,6 +82,7 @@
 #include "Core/HLE/sceUsbGps.h"
 #include "Core/Util/GameManager.h"
 #include "Core/Util/AudioFormat.h"
+#include "Core/WebServer.h"
 #include "GPU/GPUInterface.h"
 
 #include "ui_atlas.h"
@@ -96,6 +95,7 @@
 #include "UI/TiltEventProcessor.h"
 #include "UI/BackgroundAudio.h"
 #include "UI/TextureUtil.h"
+#include "UI/DiscordIntegration.h"
 
 #if !defined(MOBILE_DEVICE)
 #include "Common/KeyMap.h"
@@ -103,6 +103,9 @@
 
 #if !defined(MOBILE_DEVICE) && defined(USING_QT_UI)
 #include "Qt/QtHost.h"
+#endif
+#if defined(USING_QT_UI)
+#include <QFontDatabase>
 #endif
 
 // The new UI framework, for initialization
@@ -130,6 +133,7 @@ static UI::Theme ui_theme;
 ScreenManager *screenManager;
 std::string config_filename;
 
+bool g_graphicsIniting;
 bool g_graphicsInited;
 
 // Really need to clean this mess of globals up... but instead I add more :P
@@ -139,6 +143,7 @@ static bool resized = false;
 static bool restarting = false;
 
 static bool askedForStoragePermission = false;
+static int renderCounter = 0;
 
 struct PendingMessage {
 	std::string msg;
@@ -220,6 +225,10 @@ std::string NativeQueryConfig(std::string query) {
 		return std::string(g_Config.bImmersiveMode ? "1" : "0");
 	} else if (query == "hwScale") {
 		int scale = g_Config.iAndroidHwScale;
+		// Override hw scale for TV type devices.
+		if (System_GetPropertyInt(SYSPROP_DEVICE_TYPE) == DEVICE_TYPE_TV)
+			scale = 0;
+
 		if (scale == 1) {
 			// If g_Config.iInternalResolution is also set to Auto (1), we fall back to "Device resolution" (0). It works out.
 			scale = g_Config.iInternalResolution;
@@ -275,7 +284,7 @@ void NativeGetAppInfo(std::string *app_dir_name, std::string *app_nice_name, boo
 #endif
 }
 
-#if defined(_WIN32) && !PPSSPP_PLATFORM(UWP)
+#if defined(USING_WIN_UI) && !PPSSPP_PLATFORM(UWP)
 static bool CheckFontIsUsable(const wchar_t *fontFace) {
 	wchar_t actualFontFace[1024] = { 0 };
 
@@ -317,7 +326,7 @@ static void PostLoadConfig() {
 
 	// Allow the lang directory to be overridden for testing purposes (e.g. Android, where it's hard to
 	// test new languages without recompiling the entire app, which is a hassle).
-	const std::string langOverridePath = g_Config.memStickDirectory + "PSP/SYSTEM/lang/";
+	const std::string langOverridePath = GetSysDirectory(DIRECTORY_SYSTEM) + "lang/";
 
 	// If we run into the unlikely case that "lang" is actually a file, just use the built-in translations.
 	if (!File::Exists(langOverridePath) || !File::IsDirectory(langOverridePath))
@@ -330,22 +339,90 @@ void CreateDirectoriesAndroid() {
 	// On Android, create a PSP directory tree in the external_dir,
 	// to hopefully reduce confusion a bit.
 	ILOG("Creating %s", (g_Config.memStickDirectory + "PSP").c_str());
-	File::CreateDir(g_Config.memStickDirectory + "PSP");
-	File::CreateDir(g_Config.memStickDirectory + "PSP/SAVEDATA");
-	File::CreateDir(g_Config.memStickDirectory + "PSP/PPSSPP_STATE");
-	File::CreateDir(g_Config.memStickDirectory + "PSP/GAME");
-	File::CreateDir(g_Config.memStickDirectory + "PSP/SYSTEM");
+	File::CreateFullPath(g_Config.memStickDirectory + "PSP");
+	File::CreateFullPath(GetSysDirectory(DIRECTORY_SAVEDATA));
+	File::CreateFullPath(GetSysDirectory(DIRECTORY_SAVESTATE));
+	File::CreateFullPath(GetSysDirectory(DIRECTORY_GAME));
+	File::CreateFullPath(GetSysDirectory(DIRECTORY_SYSTEM));
 
 	// Avoid media scanners in PPSSPP_STATE and SAVEDATA directories
-	File::CreateEmptyFile(g_Config.memStickDirectory + "PSP/PPSSPP_STATE/.nomedia");
-	File::CreateEmptyFile(g_Config.memStickDirectory + "PSP/SAVEDATA/.nomedia");
+	File::CreateEmptyFile(GetSysDirectory(DIRECTORY_SAVESTATE) + ".nomedia");
+	File::CreateEmptyFile(GetSysDirectory(DIRECTORY_SAVEDATA) + ".nomedia");
+	File::CreateEmptyFile(GetSysDirectory(DIRECTORY_SYSTEM) + ".nomedia");
 }
 
-void NativeInit(int argc, const char *argv[], const char *savegame_dir, const char *external_dir, const char *cache_dir, bool fs) {
+static void CheckFailedGPUBackends() {
+#ifdef _DEBUG
+	// If you're in debug mode, you probably don't want a fallback. If you're in release mode, use IGNORE below.
+	WARN_LOG(LOADER, "Not checking for failed graphics backends in debug mode");
+	return;
+#endif
+
+	// We only want to do this once per process run and backend, to detect process crashes.
+	// If NativeShutdown is called before we finish, we might call this multiple times.
+	static int lastBackend = -1;
+	if (lastBackend == g_Config.iGPUBackend) {
+		return;
+	}
+	lastBackend = g_Config.iGPUBackend;
+
+	std::string cache = GetSysDirectory(DIRECTORY_APP_CACHE) + "/FailedGraphicsBackends.txt";
+
+	if (System_GetPropertyBool(SYSPROP_SUPPORTS_PERMISSIONS)) {
+		std::string data;
+		if (readFileToString(true, cache.c_str(), data))
+			g_Config.sFailedGPUBackends = data;
+	}
+
+	// Use this if you want to debug a graphics crash...
+	if (g_Config.sFailedGPUBackends == "IGNORE")
+		return;
+	else if (!g_Config.sFailedGPUBackends.empty())
+		ERROR_LOG(LOADER, "Failed graphics backends: %s", g_Config.sFailedGPUBackends.c_str());
+
+	// Okay, let's not try a backend in the failed list.
+	g_Config.iGPUBackend = g_Config.NextValidBackend();
+	if (lastBackend != g_Config.iGPUBackend)
+		WARN_LOG(LOADER, "Failed graphics backend switched from %d to %d", lastBackend, g_Config.iGPUBackend);
+	// And then let's - for now - add the current to the failed list.
+	if (g_Config.sFailedGPUBackends.empty()) {
+		g_Config.sFailedGPUBackends = StringFromFormat("%d", g_Config.iGPUBackend);
+	} else if (g_Config.sFailedGPUBackends.find("ALL") == std::string::npos) {
+		g_Config.sFailedGPUBackends += StringFromFormat(",%d", g_Config.iGPUBackend);
+	}
+
+	if (System_GetPropertyBool(SYSPROP_SUPPORTS_PERMISSIONS)) {
+		// Let's try to create, in case it doesn't exist.
+		if (!File::Exists(GetSysDirectory(DIRECTORY_APP_CACHE)))
+			File::CreateDir(GetSysDirectory(DIRECTORY_APP_CACHE));
+		writeStringToFile(true, g_Config.sFailedGPUBackends, cache.c_str());
+	} else {
+		// Just save immediately, since we have storage.
+		g_Config.Save();
+	}
+}
+
+static void ClearFailedGPUBackends() {
+	if (g_Config.sFailedGPUBackends == "IGNORE")
+		return;
+
+	// We've successfully started graphics without crashing, hurray.
+	// In case they update drivers and have totally different problems much later, clear the failed list.
+	g_Config.sFailedGPUBackends.clear();
+	if (System_GetPropertyBool(SYSPROP_SUPPORTS_PERMISSIONS)) {
+		File::Delete(GetSysDirectory(DIRECTORY_APP_CACHE) + "/FailedGraphicsBackends.txt");
+	} else {
+		g_Config.Save();
+	}
+}
+
+void NativeInit(int argc, const char *argv[], const char *savegame_dir, const char *external_dir, const char *cache_dir) {
 	net::Init();  // This needs to happen before we load the config. So on Windows we also run it in Main. It's fine to call multiple times.
 
 	InitFastMath(cpu_info.bNEON);
 	SetupAudioFormats();
+
+	g_Discord.SetPresenceMenu();
 
 	// Make sure UI state is MENU.
 	ResetUIState();
@@ -359,9 +436,7 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 #endif
 
 	// We want this to be FIRST.
-#ifdef USING_QT_UI
-	VFSRegister("", new AssetsAssetReader());
-#elif defined(IOS)
+#if defined(IOS)
 	// Packed assets are included in app
 	VFSRegister("", new DirectoryAssetReader(external_dir));
 #endif
@@ -414,8 +489,8 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 
 #ifndef _WIN32
 	g_Config.AddSearchPath(user_data_path);
-	g_Config.AddSearchPath(g_Config.memStickDirectory + "PSP/SYSTEM/");
-	g_Config.SetDefaultPath(g_Config.memStickDirectory + "PSP/SYSTEM/");
+	g_Config.AddSearchPath(GetSysDirectory(DIRECTORY_SYSTEM));
+	g_Config.SetDefaultPath(GetSysDirectory(DIRECTORY_SYSTEM));
 
 	// Note that if we don't have storage permission here, loading the config will
 	// fail and it will be set to the default. Later, we load again when we get permission.
@@ -472,6 +547,8 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 #endif
 				if (!strncmp(argv[i], "--pause-menu-exit", strlen("--pause-menu-exit")))
 					g_Config.bPauseMenuExitsEmulator = true;
+				if (!strcmp(argv[i], "--fullscreen"))
+					g_Config.bFullScreen = true;
 				break;
 			}
 		} else {
@@ -559,7 +636,7 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 	// Note to translators: do not translate this/add this to PPSSPP-lang's files.
 	// It's intended to be custom for every user.
 	// Only add it to your own personal copies of PPSSPP.
-#if defined(_WIN32) && !PPSSPP_PLATFORM(UWP)
+#if defined(USING_WIN_UI) && !PPSSPP_PLATFORM(UWP)
 	// TODO: Could allow a setting to specify a font file to load?
 	// TODO: Make this a constant if we can sanely load the font on other systems?
 	AddFontResourceEx(L"assets/Roboto-Condensed.ttf", FR_PRIVATE, NULL);
@@ -569,12 +646,28 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 	} else {
 		g_Config.sFont = des->T("Font", "Roboto");
 	}
+#elif defined(USING_QT_UI)
+	size_t fontSize = 0;
+	uint8_t *fontData = VFSReadFile("Roboto-Condensed.ttf", &fontSize);
+	if (fontData) {
+		int fontID = QFontDatabase::addApplicationFontFromData(QByteArray((const char *)fontData, fontSize));
+		delete [] fontData;
+
+		QStringList fontsFound = QFontDatabase::applicationFontFamilies(fontID);
+		if (fontsFound.size() >= 1) {
+			// Might be "Roboto" or "Roboto Condensed".
+			g_Config.sFont = des->T("Font", fontsFound.at(0).toUtf8().constData());
+		}
+	} else {
+		// Let's try for it being a system font.
+		g_Config.sFont = des->T("Font", "Roboto Condensed");
+	}
 #endif
 
 	if (!boot_filename.empty() && stateToLoad != NULL) {
-		SaveState::Load(stateToLoad, [](bool status, const std::string &message, void *) {
+		SaveState::Load(stateToLoad, [](SaveState::Status status, const std::string &message, void *) {
 			if (!message.empty()) {
-				osm.Show(message, 2.0);
+				osm.Show(message, status == SaveState::Status::SUCCESS ? 2.0 : 5.0);
 			}
 		});
 	}
@@ -586,15 +679,18 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 		screenManager->switchScreen(new LogoScreen());
 	}
 
-	if (g_Config.bRemoteShareOnStartup) {
-		StartRemoteISOSharing();
-	}
+	if (g_Config.bRemoteShareOnStartup && g_Config.bRemoteDebuggerOnStartup)
+		StartWebServer(WebServerFlags::ALL);
+	else if (g_Config.bRemoteShareOnStartup)
+		StartWebServer(WebServerFlags::DISCS);
+	else if (g_Config.bRemoteDebuggerOnStartup)
+		StartWebServer(WebServerFlags::DEBUGGER);
 
 	std::string sysName = System_GetProperty(SYSPROP_NAME);
 	isOuya = KeyMap::IsOuya(sysName);
 
 #if !defined(MOBILE_DEVICE) && defined(USING_QT_UI)
-	MainWindow* mainWindow = new MainWindow(0,fs);
+	MainWindow *mainWindow = new MainWindow(nullptr, g_Config.bFullScreen);
 	mainWindow->show();
 	if (host == nullptr) {
 		host = new QtHost(mainWindow);
@@ -603,7 +699,9 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 
 	// We do this here, instead of in NativeInitGraphics, because the display may be reset.
 	// When it's reset we don't want to forget all our managed things.
+	CheckFailedGPUBackends();
 	SetGPUBackend((GPUBackend) g_Config.iGPUBackend);
+	renderCounter = 0;
 
 	// Must be done restarting by now.
 	restarting = false;
@@ -618,7 +716,7 @@ static UI::Style MakeStyle(uint32_t fg, uint32_t bg) {
 }
 
 static void UIThemeInit() {
-#if defined(_WIN32) && !PPSSPP_PLATFORM(UWP)
+#if (defined(USING_WIN_UI) && !PPSSPP_PLATFORM(UWP)) || defined(USING_QT_UI)
 	ui_theme.uiFont = UI::FontStyle(UBUNTU24, g_Config.sFont.c_str(), 22);
 	ui_theme.uiFontSmall = UI::FontStyle(UBUNTU24, g_Config.sFont.c_str(), 15);
 	ui_theme.uiFontSmaller = UI::FontStyle(UBUNTU24, g_Config.sFont.c_str(), 12);
@@ -656,6 +754,7 @@ static void UIThemeInit() {
 void RenderOverlays(UIContext *dc, void *userdata);
 
 bool NativeInitGraphics(GraphicsContext *graphicsContext) {
+	g_graphicsIniting = true;
 	ILOG("NativeInitGraphics");
 	_assert_msg_(G3D, graphicsContext, "No graphics context!");
 
@@ -732,6 +831,7 @@ bool NativeInitGraphics(GraphicsContext *graphicsContext) {
 		gpu->DeviceRestore();
 
 	g_graphicsInited = true;
+	g_graphicsIniting = false;
 	ILOG("NativeInitGraphics completed");
 	return true;
 }
@@ -924,6 +1024,11 @@ void NativeRender(GraphicsContext *graphicsContext) {
 
 	ui_draw2d.PopDrawMatrix();
 	ui_draw2d_front.PopDrawMatrix();
+
+	if (renderCounter < 10 && ++renderCounter == 10) {
+		// We're rendering fine, clear out failure info.
+		ClearFailedGPUBackends();
+	}
 }
 
 void HandleGlobalMessage(const std::string &msg, const std::string &value) {
@@ -1004,6 +1109,8 @@ void NativeUpdate() {
 
 	g_DownloadManager.Update();
 	screenManager->update();
+
+	g_Discord.Update();
 }
 
 bool NativeIsAtTopLevel() {
@@ -1146,7 +1253,7 @@ void NativeMessageReceived(const char *message, const char *value) {
 
 void NativeResized() {
 	// NativeResized can come from any thread so we just set a flag, then process it later.
-	if (g_graphicsInited) {
+	if (g_graphicsInited || g_graphicsIniting) {
 		resized = true;
 	} else {
 		ILOG("NativeResized ignored, not initialized");
@@ -1188,6 +1295,8 @@ void NativeShutdown() {
 	System_SendMessage("finish", "");
 
 	net::Shutdown();
+
+	g_Discord.Shutdown();
 
 	delete logger;
 	logger = nullptr;

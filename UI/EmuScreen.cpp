@@ -41,6 +41,7 @@
 #include "Core/AVIDump.h"
 #endif
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/CoreTiming.h"
 #include "Core/CoreParameter.h"
 #include "Core/Core.h"
@@ -76,6 +77,7 @@
 #include "UI/GameSettingsScreen.h"
 #include "UI/InstallZipScreen.h"
 #include "UI/ProfilerDraw.h"
+#include "UI/DiscordIntegration.h"
 
 #if defined(_WIN32) && !PPSSPP_PLATFORM(UWP)
 #include "Windows/MainWindow.h"
@@ -127,6 +129,9 @@ EmuScreen::EmuScreen(const std::string &filename)
 	frameStep_ = false;
 	lastNumFlips = gpuStats.numFlips;
 	startDumping = false;
+	// Make sure we don't leave it at powerdown after the last game.
+	if (coreState == CORE_POWERDOWN)
+		coreState = CORE_STEPPING;
 
 	OnDevMenu.Handle(this, &EmuScreen::OnDevTools);
 }
@@ -185,15 +190,24 @@ void EmuScreen::bootGame(const std::string &filename) {
 	if (!bootAllowStorage(filename))
 		return;
 
-	//pre-emptive loading of game specific config if possible, to get all the settings
+	I18NCategory *sc = GetI18NCategory("Screen");
+
+	invalid_ = true;
+
+	// We don't want to boot with the wrong game specific config, so wait until info is ready.
 	std::shared_ptr<GameInfo> info = g_gameInfoCache->GetInfo(nullptr, filename, 0);
-	if (info && !info->id.empty()) {
+	if (!info || info->pending)
+		return;
+
+	if (!info->id.empty()) {
 		g_Config.loadGameConfig(info->id);
 		// Reset views in case controls are in a different place.
 		RecreateViews();
-	}
 
-	invalid_ = true;
+		g_Discord.SetPresenceGame(info->GetTitle().c_str());
+	} else {
+		g_Discord.SetPresenceGame(sc->T("Untitled PSP game"));
+	}
 
 	CoreParameter coreParam{};
 	coreParam.cpuCore = (CPUCore)g_Config.iCpuCore;
@@ -217,6 +231,7 @@ void EmuScreen::bootGame(const std::string &filename) {
 	if (g_Config.bSoftwareRendering) {
 		coreParam.gpuCore = GPUCORE_SOFTWARE;
 	}
+
 	// Preserve the existing graphics context.
 	coreParam.graphicsContext = PSP_CoreParameter().graphicsContext;
 	coreParam.thin3d = screenManager()->getDrawContext();
@@ -224,7 +239,7 @@ void EmuScreen::bootGame(const std::string &filename) {
 	coreParam.fileToStart = filename;
 	coreParam.mountIso = "";
 	coreParam.mountRoot = "";
-	coreParam.startPaused = false;
+	coreParam.startBreak = !g_Config.bAutoRun;
 	coreParam.printfEmuLog = false;
 	coreParam.headLess = false;
 
@@ -320,7 +335,7 @@ void EmuScreen::bootComplete() {
 }
 
 EmuScreen::~EmuScreen() {
-	if (!invalid_) {
+	if (!invalid_ || bootPending_) {
 		// If we were invalid, it would already be shutdown.
 		PSP_Shutdown();
 	}
@@ -332,6 +347,11 @@ EmuScreen::~EmuScreen() {
 		startDumping = false;
 	}
 #endif
+
+	if (GetUIState() == UISTATE_EXIT)
+		g_Discord.ClearPresence();
+	else
+		g_Discord.SetPresenceMenu();
 }
 
 void EmuScreen::dialogFinished(const Screen *dialog, DialogResult result) {
@@ -346,14 +366,14 @@ void EmuScreen::dialogFinished(const Screen *dialog, DialogResult result) {
 	RecreateViews();
 }
 
-static void AfterSaveStateAction(bool success, const std::string &message, void *) {
+static void AfterSaveStateAction(SaveState::Status status, const std::string &message, void *) {
 	if (!message.empty()) {
-		osm.Show(message, 2.0);
+		osm.Show(message, status == SaveState::Status::SUCCESS ? 2.0 : 5.0);
 	}
 }
 
-static void AfterStateBoot(bool success, const std::string &message, void *ignored) {
-	AfterSaveStateAction(success, message, ignored);
+static void AfterStateBoot(SaveState::Status status, const std::string &message, void *ignored) {
+	AfterSaveStateAction(status, message, ignored);
 	Core_EnableStepping(false);
 	host->UpdateDisassembly();
 }
@@ -464,17 +484,36 @@ void EmuScreen::onVKeyDown(int virtualKeyCode) {
 
 	switch (virtualKeyCode) {
 	case VIRTKEY_UNTHROTTLE:
+		if (coreState == CORE_STEPPING) {
+			Core_EnableStepping(false);
+		}
 		PSP_CoreParameter().unthrottle = true;
 		break;
 
 	case VIRTKEY_SPEED_TOGGLE:
-		if (PSP_CoreParameter().fpsLimit == 0) {
-			PSP_CoreParameter().fpsLimit = 1;
+		// Cycle through enabled speeds.
+		if (PSP_CoreParameter().fpsLimit == FPSLimit::NORMAL && g_Config.iFpsLimit1 >= 0) {
+			PSP_CoreParameter().fpsLimit = FPSLimit::CUSTOM1;
+			osm.Show(sc->T("fixed", "Speed: alternate"), 1.0);
+		} else if (PSP_CoreParameter().fpsLimit != FPSLimit::CUSTOM2 && g_Config.iFpsLimit2 >= 0) {
+			PSP_CoreParameter().fpsLimit = FPSLimit::CUSTOM2;
+			osm.Show(sc->T("SpeedCustom2", "Speed: alternate 2"), 1.0);
+		} else if (PSP_CoreParameter().fpsLimit != FPSLimit::NORMAL) {
+			PSP_CoreParameter().fpsLimit = FPSLimit::NORMAL;
+			osm.Show(sc->T("standard", "Speed: standard"), 1.0);
+		}
+		break;
+
+	case VIRTKEY_SPEED_CUSTOM1:
+		if (PSP_CoreParameter().fpsLimit == FPSLimit::NORMAL) {
+			PSP_CoreParameter().fpsLimit = FPSLimit::CUSTOM1;
 			osm.Show(sc->T("fixed", "Speed: alternate"), 1.0);
 		}
-		else if (PSP_CoreParameter().fpsLimit == 1) {
-			PSP_CoreParameter().fpsLimit = 0;
-			osm.Show(sc->T("standard", "Speed: standard"), 1.0);
+		break;
+	case VIRTKEY_SPEED_CUSTOM2:
+		if (PSP_CoreParameter().fpsLimit == FPSLimit::NORMAL) {
+			PSP_CoreParameter().fpsLimit = FPSLimit::CUSTOM2;
+			osm.Show(sc->T("SpeedCustom2", "Speed: alternate 2"), 1.0);
 		}
 		break;
 
@@ -577,9 +616,24 @@ void EmuScreen::onVKeyDown(int virtualKeyCode) {
 }
 
 void EmuScreen::onVKeyUp(int virtualKeyCode) {
+	I18NCategory *sc = GetI18NCategory("Screen");
+
 	switch (virtualKeyCode) {
 	case VIRTKEY_UNTHROTTLE:
 		PSP_CoreParameter().unthrottle = false;
+		break;
+
+	case VIRTKEY_SPEED_CUSTOM1:
+		if (PSP_CoreParameter().fpsLimit == FPSLimit::CUSTOM1) {
+			PSP_CoreParameter().fpsLimit = FPSLimit::NORMAL;
+			osm.Show(sc->T("standard", "Speed: standard"), 1.0);
+		}
+		break;
+	case VIRTKEY_SPEED_CUSTOM2:
+		if (PSP_CoreParameter().fpsLimit == FPSLimit::CUSTOM2) {
+			PSP_CoreParameter().fpsLimit = FPSLimit::NORMAL;
+			osm.Show(sc->T("standard", "Speed: standard"), 1.0);
+		}
 		break;
 
 	case VIRTKEY_AXIS_X_MIN:
@@ -1003,11 +1057,6 @@ void EmuScreen::update() {
 	// Virtual keys.
 	__CtrlSetRapidFire(virtKeys[VIRTKEY_RAPID_FIRE - VIRTKEY_FIRST]);
 
-	// Make sure fpsLimit starts at 0
-	if (PSP_CoreParameter().fpsLimit != 0 && PSP_CoreParameter().fpsLimit != 1) {
-		PSP_CoreParameter().fpsLimit = 0;
-	}
-
 	// This is here to support the iOS on screen back button.
 	if (pauseTrigger_) {
 		pauseTrigger_ = false;
@@ -1193,22 +1242,20 @@ void EmuScreen::render() {
 
 	PSP_BeginHostFrame();
 
-	// We just run the CPU until we get to vblank. This will quickly sync up pretty nicely.
-	// The actual number of cycles doesn't matter so much here as we will break due to CORE_NEXTFRAME, most of the time hopefully...
-	int blockTicks = usToCycles(1000000 / 10);
-
-	// Run until CORE_NEXTFRAME
-	while (coreState == CORE_RUNNING) {
-		PSP_RunLoopFor(blockTicks);
-	}
+	PSP_RunLoopWhileState();
 
 	// Hopefully coreState is now CORE_NEXTFRAME
 	if (coreState == CORE_NEXTFRAME) {
 		// set back to running for the next frame
 		coreState = CORE_RUNNING;
 	} else if (coreState == CORE_STEPPING) {
-		// If we're stepping, it's convenient not to clear the screen.
-		thin3d->BindFramebufferAsRenderTarget(nullptr, { RPAction::KEEP, RPAction::DONT_CARE, RPAction::DONT_CARE });
+		// If we're stepping, it's convenient not to clear the screen entirely, so we copy display to output.
+		// This won't work in non-buffered, but that's fine.
+		thin3d->BindFramebufferAsRenderTarget(nullptr, { RPAction::CLEAR, RPAction::DONT_CARE, RPAction::DONT_CARE });
+		// Just to make sure.
+		if (PSP_IsInited()) {
+			gpu->CopyDisplayToOutput();
+		}
 	} else {
 		// Didn't actually reach the end of the frame, ran out of the blockTicks cycles.
 		// In this case we need to bind and wipe the backbuffer, at least.
@@ -1309,11 +1356,26 @@ void EmuScreen::renderUI() {
 }
 
 void EmuScreen::autoLoad() {
+	int autoSlot = -1;
+
 	//check if save state has save, if so, load
-	int lastSlot = SaveState::GetNewestSlot(gamePath_);
-	if (g_Config.bEnableAutoLoad && lastSlot != -1) {
-		SaveState::LoadSlot(gamePath_, lastSlot, &AfterSaveStateAction);
-		g_Config.iCurrentStateSlot = lastSlot;
+	switch (g_Config.iAutoLoadSaveState) {
+	case (int)AutoLoadSaveState::OFF: // "AutoLoad Off"
+		return;
+	case (int)AutoLoadSaveState::OLDEST: // "Oldest Save"
+		autoSlot = SaveState::GetOldestSlot(gamePath_);
+		break;
+	case (int)AutoLoadSaveState::NEWEST: // "Newest Save"
+		autoSlot = SaveState::GetNewestSlot(gamePath_);
+		break;
+	default: // try the specific save state slot specified
+		autoSlot = (SaveState::HasSaveInSlot(gamePath_, g_Config.iAutoLoadSaveState - 3)) ? (g_Config.iAutoLoadSaveState - 3) : -1;
+		break;
+	}
+
+	if (g_Config.iAutoLoadSaveState && autoSlot != -1) {
+		SaveState::LoadSlot(gamePath_, autoSlot, &AfterSaveStateAction);
+		g_Config.iCurrentStateSlot = autoSlot;
 	}
 }
 

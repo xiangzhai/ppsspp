@@ -49,9 +49,12 @@
 #include "Common/FileUtil.h"
 #include "Common/OSVersion.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/Host.h"
 #include "Core/System.h"
 #include "Core/Reporting.h"
+#include "Core/TextureReplacer.h"
+#include "Core/WebServer.h"
 #include "GPU/Common/PostShader.h"
 #include "android/jni/TestRunner.h"
 #include "GPU/GPUInterface.h"
@@ -77,7 +80,7 @@ bool GameSettingsScreen::UseVerticalLayout() const {
 
 // This needs before run CheckGPUFeatures()
 // TODO: Remove this if fix the issue
-bool CheckSupportInstancedTessellationGLES() {
+bool CheckSupportShaderTessellationGLES() {
 #if PPSSPP_PLATFORM(UWP)
 	return true;
 #else
@@ -85,26 +88,23 @@ bool CheckSupportInstancedTessellationGLES() {
 	int maxVertexTextureImageUnits = gl_extensions.maxVertexTextureUnits;
 	bool vertexTexture = maxVertexTextureImageUnits >= 3; // At least 3 for hardware tessellation
 
-	bool canUseInstanceID = gl_extensions.EXT_draw_instanced || gl_extensions.ARB_draw_instanced;
-	bool canDefInstanceID = gl_extensions.IsGLES || gl_extensions.EXT_gpu_shader4 || gl_extensions.VersionGEThan(3, 1);
-	bool instanceRendering = gl_extensions.GLES3 || (canUseInstanceID && canDefInstanceID);
-
 	bool textureFloat = gl_extensions.ARB_texture_float || gl_extensions.OES_texture_float;
 	bool hasTexelFetch = gl_extensions.GLES3 || (!gl_extensions.IsGLES && gl_extensions.VersionGEThan(3, 3, 0)) || gl_extensions.EXT_gpu_shader4;
 
-	return instanceRendering && vertexTexture && textureFloat && hasTexelFetch;
+	return vertexTexture && textureFloat && hasTexelFetch;
 #endif
 }
 
 bool DoesBackendSupportHWTess() {
 	switch (GetGPUBackend()) {
 	case GPUBackend::OPENGL:
-		return CheckSupportInstancedTessellationGLES();
+		return CheckSupportShaderTessellationGLES();
 	case GPUBackend::VULKAN:
 	case GPUBackend::DIRECT3D11:
 		return true;
+	default:
+		return false;
 	}
-	return false;
 }
 
 static std::string PostShaderTranslateName(const char *value) {
@@ -117,14 +117,29 @@ static std::string PostShaderTranslateName(const char *value) {
 	}
 }
 
+static std::string *GPUDeviceNameSetting() {
+	if (g_Config.iGPUBackend == (int)GPUBackend::VULKAN) {
+		return &g_Config.sVulkanDevice;
+	}
+#ifdef _WIN32
+	if (g_Config.iGPUBackend == (int)GPUBackend::DIRECT3D11) {
+		return &g_Config.sD3D11Device;
+	}
+#endif
+	return nullptr;
+}
+
 void GameSettingsScreen::CreateViews() {
+	ReloadAllPostShaderInfo();
+
 	if (editThenRestore_) {
 		g_Config.loadGameConfig(gameID_);
 	}
 
 	cap60FPS_ = g_Config.iForceMaxEmulatedFPS == 60;
 
-	iAlternateSpeedPercent_ = (g_Config.iFpsLimit * 100) / 60;
+	iAlternateSpeedPercent1_ = g_Config.iFpsLimit1 < 0 ? -1 : (g_Config.iFpsLimit1 * 100) / 60;
+	iAlternateSpeedPercent2_ = g_Config.iFpsLimit2 < 0 ? -1 : (g_Config.iFpsLimit2 * 100) / 60;
 
 	bool vertical = UseVerticalLayout();
 
@@ -206,18 +221,10 @@ void GameSettingsScreen::CreateViews() {
 
 	// Backends that don't allow a device choice will only expose one device.
 	if (draw->GetDeviceList().size() > 1) {
-		std::string *deviceNameSetting = nullptr;
-		if (g_Config.iGPUBackend == (int)GPUBackend::VULKAN) {
-			deviceNameSetting = &g_Config.sVulkanDevice;
-		}
-#ifdef _WIN32
-		if (g_Config.iGPUBackend == (int)GPUBackend::DIRECT3D11) {
-			deviceNameSetting = &g_Config.sD3D11Device;
-		}
-#endif
+		std::string *deviceNameSetting = GPUDeviceNameSetting();
 		if (deviceNameSetting) {
 			PopupMultiChoiceDynamic *deviceChoice = graphicsSettings->Add(new PopupMultiChoiceDynamic(deviceNameSetting, gr->T("Device"), draw->GetDeviceList(), nullptr, screenManager()));
-			deviceChoice->OnChoice.Handle(this, &GameSettingsScreen::OnRenderingBackend);
+			deviceChoice->OnChoice.Handle(this, &GameSettingsScreen::OnRenderingDevice);
 		}
 	}
 
@@ -264,13 +271,21 @@ void GameSettingsScreen::CreateViews() {
 	graphicsSettings->Add(new ItemHeader(gr->T("Frame Rate Control")));
 	static const char *frameSkip[] = {"Off", "1", "2", "3", "4", "5", "6", "7", "8"};
 	graphicsSettings->Add(new PopupMultiChoice(&g_Config.iFrameSkip, gr->T("Frame Skipping"), frameSkip, 0, ARRAY_SIZE(frameSkip), gr->GetName(), screenManager()));
+	static const char *frameSkipType[] = {"Number of Frames", "Percent of FPS"};
+	graphicsSettings->Add(new PopupMultiChoice(&g_Config.iFrameSkipType, gr->T("Frame Skipping Type"), frameSkipType, 0, ARRAY_SIZE(frameSkipType), gr->GetName(), screenManager()));
 	frameSkipAuto_ = graphicsSettings->Add(new CheckBox(&g_Config.bAutoFrameSkip, gr->T("Auto FrameSkip")));
 	frameSkipAuto_->OnClick.Handle(this, &GameSettingsScreen::OnAutoFrameskip);
 	graphicsSettings->Add(new CheckBox(&cap60FPS_, gr->T("Force max 60 FPS (helps GoW)")));
 
-	PopupSliderChoice *altSpeed = graphicsSettings->Add(new PopupSliderChoice(&iAlternateSpeedPercent_, 0, 1000, gr->T("Alternative Speed", "Alternative speed"), 5, screenManager(), gr->T("%, 0:unlimited")));
-	altSpeed->SetFormat("%i%%");
-	altSpeed->SetZeroLabel(gr->T("Unlimited"));
+	PopupSliderChoice *altSpeed1 = graphicsSettings->Add(new PopupSliderChoice(&iAlternateSpeedPercent1_, 0, 1000, gr->T("Alternative Speed", "Alternative speed"), 5, screenManager(), gr->T("%, 0:unlimited")));
+	altSpeed1->SetFormat("%i%%");
+	altSpeed1->SetZeroLabel(gr->T("Unlimited"));
+	altSpeed1->SetNegativeDisable(gr->T("Disabled"));
+
+	PopupSliderChoice *altSpeed2 = graphicsSettings->Add(new PopupSliderChoice(&iAlternateSpeedPercent2_, 0, 1000, gr->T("Alternative Speed 2", "Alternative speed 2 (in %, 0 = unlimited)"), 5, screenManager(), gr->T("%, 0:unlimited")));
+	altSpeed2->SetFormat("%i%%");
+	altSpeed2->SetZeroLabel(gr->T("Unlimited"));
+	altSpeed2->SetNegativeDisable(gr->T("Disabled"));
 
 	graphicsSettings->Add(new ItemHeader(gr->T("Features")));
 	// Hide postprocess option on unsupported backends to avoid confusion.
@@ -313,13 +328,15 @@ void GameSettingsScreen::CreateViews() {
 	resolutionChoice_->SetEnabledPtr(&resolutionEnable_);
 
 #ifdef __ANDROID__
-	static const char *deviceResolutions[] = { "Native device resolution", "Auto (same as Rendering)", "1x PSP", "2x PSP", "3x PSP", "4x PSP", "5x PSP" };
-	int max_res_temp = std::max(System_GetPropertyInt(SYSPROP_DISPLAY_XRES), System_GetPropertyInt(SYSPROP_DISPLAY_YRES)) / 480 + 2;
-	if (max_res_temp == 3)
-		max_res_temp = 4;  // At least allow 2x
-	int max_res = std::min(max_res_temp, (int)ARRAY_SIZE(deviceResolutions));
-	UI::PopupMultiChoice *hwscale = graphicsSettings->Add(new PopupMultiChoice(&g_Config.iAndroidHwScale, gr->T("Display Resolution (HW scaler)"), deviceResolutions, 0, max_res, gr->GetName(), screenManager()));
-	hwscale->OnChoice.Handle(this, &GameSettingsScreen::OnHwScaleChange);  // To refresh the display mode
+	if (System_GetPropertyInt(SYSPROP_DEVICE_TYPE) != DEVICE_TYPE_TV) {
+		static const char *deviceResolutions[] = { "Native device resolution", "Auto (same as Rendering)", "1x PSP", "2x PSP", "3x PSP", "4x PSP", "5x PSP" };
+		int max_res_temp = std::max(System_GetPropertyInt(SYSPROP_DISPLAY_XRES), System_GetPropertyInt(SYSPROP_DISPLAY_YRES)) / 480 + 2;
+		if (max_res_temp == 3)
+			max_res_temp = 4;  // At least allow 2x
+		int max_res = std::min(max_res_temp, (int)ARRAY_SIZE(deviceResolutions));
+		UI::PopupMultiChoice *hwscale = graphicsSettings->Add(new PopupMultiChoice(&g_Config.iAndroidHwScale, gr->T("Display Resolution (HW scaler)"), deviceResolutions, 0, max_res, gr->GetName(), screenManager()));
+		hwscale->OnChoice.Handle(this, &GameSettingsScreen::OnHwScaleChange);  // To refresh the display mode
+	}
 #endif
 
 #ifdef _WIN32
@@ -373,11 +390,10 @@ void GameSettingsScreen::CreateViews() {
 		}
 		return UI::EVENT_CONTINUE;
 	});
-	beziersChoice->SetDisabledPtr(&g_Config.bHardwareTessellation);
 
 	CheckBox *tessellationHW = graphicsSettings->Add(new CheckBox(&g_Config.bHardwareTessellation, gr->T("Hardware Tessellation")));
 	tessellationHW->OnClick.Add([=](EventParams &e) {
-		settingInfo_->Show(gr->T("HardwareTessellation Tip", "Uses hardware to make curves, always uses a fixed quality"), e.v);
+		settingInfo_->Show(gr->T("HardwareTessellation Tip", "Uses hardware to make curves"), e.v);
 		return UI::EVENT_CONTINUE;
 	});
 	tessHWEnable_ = DoesBackendSupportHWTess() && !g_Config.bSoftwareRendering && g_Config.bHardwareTransform;
@@ -574,7 +590,7 @@ void GameSettingsScreen::CreateViews() {
 		autoHide->SetEnabledPtr(&g_Config.bShowTouchControls);
 		autoHide->SetFormat("%is");
 		autoHide->SetZeroLabel(co->T("Off"));
-		static const char *touchControlStyles[] = {"Classic", "Thin borders"};
+		static const char *touchControlStyles[] = {"Classic", "Thin borders", "Glowing borders"};
 		View *style = controlsSettings->Add(new PopupMultiChoice(&g_Config.iTouchButtonStyle, co->T("Button style"), touchControlStyles, 0, ARRAY_SIZE(touchControlStyles), co->GetName(), screenManager()));
 		style->SetEnabledPtr(&g_Config.bShowTouchControls);
 	}
@@ -632,6 +648,7 @@ void GameSettingsScreen::CreateViews() {
 	networkingSettings->Add(new Choice(n->T("Adhoc Multiplayer forum")))->OnClick.Handle(this, &GameSettingsScreen::OnAdhocGuides);
 
 	networkingSettings->Add(new CheckBox(&g_Config.bEnableWlan, n->T("Enable networking", "Enable networking/wlan (beta)")));
+	networkingSettings->Add(new CheckBox(&g_Config.bDiscordPresence, n->T("Send Discord Presence information")));
 
 #if !defined(MOBILE_DEVICE) && !defined(USING_QT_UI)
 	networkingSettings->Add(new PopupTextInputChoice(&g_Config.proAdhocServer, n->T("Change proAdhocServer Address"), "", 255, screenManager()));
@@ -724,8 +741,8 @@ void GameSettingsScreen::CreateViews() {
 
 	systemSettings->Add(new Choice(sy->T("Restore Default Settings")))->OnClick.Handle(this, &GameSettingsScreen::OnRestoreDefaultSettings);
 	systemSettings->Add(new CheckBox(&g_Config.bEnableStateUndo, sy->T("Savestate slot backups")));
-	systemSettings->Add(new CheckBox(&g_Config.bEnableAutoLoad, sy->T("Auto Load Newest Savestate")));
-
+	static const char *autoLoadSaveStateChoices[] = { "Off", "Oldest Save", "Newest Save", "Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5" };
+	systemSettings->Add(new PopupMultiChoice(&g_Config.iAutoLoadSaveState, sy->T("Auto Load Savestate"), autoLoadSaveStateChoices, 0, ARRAY_SIZE(autoLoadSaveStateChoices), sy->GetName(), screenManager()));
 #if defined(USING_WIN_UI)
 	systemSettings->Add(new CheckBox(&g_Config.bBypassOSKWithKeyboard, sy->T("Enable Windows native keyboard", "Enable Windows native keyboard")));
 #endif
@@ -1030,7 +1047,8 @@ void GameSettingsScreen::update() {
 	UIScreen::update();
 	g_Config.iForceMaxEmulatedFPS = cap60FPS_ ? 60 : 0;
 
-	g_Config.iFpsLimit = (iAlternateSpeedPercent_ * 60) / 100;
+	g_Config.iFpsLimit1 = iAlternateSpeedPercent1_ < 0 ? -1 : (iAlternateSpeedPercent1_ * 60) / 100;
+	g_Config.iFpsLimit2 = iAlternateSpeedPercent2_ < 0 ? -1 : (iAlternateSpeedPercent2_ * 60) / 100;
 
 	bool vertical = UseVerticalLayout();
 	if (vertical != lastVertical_) {
@@ -1074,6 +1092,23 @@ void GameSettingsScreen::CallbackRenderingBackend(bool yes) {
 	}
 }
 
+void GameSettingsScreen::CallbackRenderingDevice(bool yes) {
+	// If the user ends up deciding not to restart, set the config back to the current backend
+	// so it doesn't get switched by accident.
+	if (yes) {
+		// Extra save here to make sure the choice really gets saved even if there are shutdown bugs in
+		// the GPU backend code.
+		g_Config.Save();
+		System_SendMessage("graphics_restart", "");
+	} else {
+		std::string *deviceNameSetting = GPUDeviceNameSetting();
+		if (deviceNameSetting)
+			*deviceNameSetting = GetGPUBackendDevice();
+		// Needed to redraw the setting.
+		RecreateViews();
+	}
+}
+
 UI::EventReturn GameSettingsScreen::OnRenderingBackend(UI::EventParams &e) {
 	I18NCategory *di = GetI18NCategory("Dialog");
 
@@ -1081,6 +1116,18 @@ UI::EventReturn GameSettingsScreen::OnRenderingBackend(UI::EventParams &e) {
 	if (g_Config.iGPUBackend != (int)GetGPUBackend()) {
 		screenManager()->push(new PromptScreen(di->T("ChangingGPUBackends", "Changing GPU backends requires PPSSPP to restart. Restart now?"), di->T("Yes"), di->T("No"),
 			std::bind(&GameSettingsScreen::CallbackRenderingBackend, this, std::placeholders::_1)));
+	}
+	return UI::EVENT_DONE;
+}
+
+UI::EventReturn GameSettingsScreen::OnRenderingDevice(UI::EventParams &e) {
+	I18NCategory *di = GetI18NCategory("Dialog");
+
+	// It only makes sense to show the restart prompt if the device was actually changed.
+	std::string *deviceNameSetting = GPUDeviceNameSetting();
+	if (deviceNameSetting && *deviceNameSetting != GetGPUBackendDevice()) {
+		screenManager()->push(new PromptScreen(di->T("ChangingGPUBackends", "Changing GPU backends requires PPSSPP to restart. Restart now?"), di->T("Yes"), di->T("No"),
+			std::bind(&GameSettingsScreen::CallbackRenderingDevice, this, std::placeholders::_1)));
 	}
 	return UI::EVENT_DONE;
 }
@@ -1254,6 +1301,12 @@ void DeveloperToolsScreen::CreateViews() {
 	cpuTests->SetEnabled(TestsAvailable());
 #endif
 
+	allowDebugger_ = !WebServerStopped(WebServerFlags::DEBUGGER);
+	canAllowDebugger_ = !WebServerStopping(WebServerFlags::DEBUGGER);
+	CheckBox *allowDebugger = new CheckBox(&allowDebugger_, dev->T("Allow remote debugger"));
+	list->Add(allowDebugger)->OnClick.Handle(this, &DeveloperToolsScreen::OnRemoteDebugger);
+	allowDebugger->SetEnabledPtr(&canAllowDebugger_);
+
 	list->Add(new CheckBox(&g_Config.bEnableLogging, dev->T("Enable Logging")))->OnClick.Handle(this, &DeveloperToolsScreen::OnLoggingChanged);
 	list->Add(new CheckBox(&g_Config.bLogFrameDrops, dev->T("Log Dropped Frame Statistics")));
 	list->Add(new Choice(dev->T("Logging Channels")))->OnClick.Handle(this, &DeveloperToolsScreen::OnLogConfig);
@@ -1325,38 +1378,9 @@ UI::EventReturn DeveloperToolsScreen::OnLoadLanguageIni(UI::EventParams &e) {
 
 UI::EventReturn DeveloperToolsScreen::OnOpenTexturesIniFile(UI::EventParams &e) {
 	std::string gameID = g_paramSFO.GetDiscID();
-	std::string texturesDirectory = GetSysDirectory(DIRECTORY_TEXTURES) + gameID + "/";
-	bool enabled_ = !gameID.empty();
-	if (enabled_) {
-		if (!File::Exists(texturesDirectory)) {
-			File::CreateFullPath(texturesDirectory);
-		}
-		if (!File::Exists(texturesDirectory + "textures.ini")) {
-			FILE *f = File::OpenCFile(texturesDirectory + "textures.ini", "wb");
-			if (f) {
-				fwrite("\xEF\xBB\xBF", 0, 3, f);
-				fclose(f);
-				// Let's also write some defaults
-				std::fstream fs;
-				File::OpenCPPFile(fs, texturesDirectory + "textures.ini", std::ios::out | std::ios::ate);
-				fs << "# This file is optional\n";
-				fs << "# for syntax explanation check:\n";
-				fs << "# - https://github.com/hrydgard/ppsspp/pull/8715 \n";
-				fs << "# - https://github.com/hrydgard/ppsspp/pull/8792 \n";
-				fs << "[options]\n";
-				fs << "version = 1\n";
-				fs << "hash = quick\n";
-				fs << "\n";
-				fs << "[hashes]\n";
-				fs << "\n";
-				fs << "[hashranges]\n";
-				fs.close();
-			}
-		}
-		enabled_ = File::Exists(texturesDirectory + "textures.ini");
-	}
-	if (enabled_) {
-		File::openIniFile(texturesDirectory + "textures.ini");
+	std::string generatedFilename;
+	if (TextureReplacer::GenerateIni(gameID, &generatedFilename)) {
+		File::openIniFile(generatedFilename);
 	}
 	return UI::EVENT_DONE;
 }
@@ -1369,6 +1393,23 @@ UI::EventReturn DeveloperToolsScreen::OnLogConfig(UI::EventParams &e) {
 UI::EventReturn DeveloperToolsScreen::OnJitAffectingSetting(UI::EventParams &e) {
 	NativeMessageReceived("clear jit", "");
 	return UI::EVENT_DONE;
+}
+
+UI::EventReturn DeveloperToolsScreen::OnRemoteDebugger(UI::EventParams &e) {
+	if (allowDebugger_) {
+		StartWebServer(WebServerFlags::DEBUGGER);
+	} else {
+		StopWebServer(WebServerFlags::DEBUGGER);
+	}
+	// Persist the setting.  Maybe should separate?
+	g_Config.bRemoteDebuggerOnStartup = allowDebugger_;
+	return UI::EVENT_CONTINUE;
+}
+
+void DeveloperToolsScreen::update() {
+	UIDialogScreenWithBackground::update();
+	allowDebugger_ = !WebServerStopped(WebServerFlags::DEBUGGER);
+	canAllowDebugger_ = !WebServerStopping(WebServerFlags::DEBUGGER);
 }
 
 void ProAdhocServerScreen::CreateViews() {

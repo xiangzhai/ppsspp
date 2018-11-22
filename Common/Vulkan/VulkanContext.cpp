@@ -444,11 +444,16 @@ int VulkanContext::GetBestPhysicalDevice() {
 		case VK_PHYSICAL_DEVICE_TYPE_CPU:
 			score += 1;
 			break;
+		case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+			score += 2;
+			break;
 		case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
 			score += 20;
 			break;
 		case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
 			score += 10;
+			break;
+		default:
 			break;
 		}
 		if (props.vendorID == VULKAN_VENDOR_AMD) {
@@ -508,7 +513,7 @@ void VulkanContext::ChooseDevice(int physical_device) {
 	memset(&featuresEnabled_, 0, sizeof(featuresEnabled_));
 
 	// Enable a few safe ones if they are available.
-	if (featuresAvailable_.dualSrcBlend) {
+	if (featuresAvailable_.dualSrcBlend && physicalDeviceProperties_[physical_device_].vendorID != VULKAN_VENDOR_QUALCOMM) {
 		featuresEnabled_.dualSrcBlend = true;
 	}
 	if (featuresAvailable_.largePoints) {
@@ -1035,6 +1040,8 @@ bool GLSLtoSPV(const VkShaderStageFlagBits shader_type,
 
 	glslang::TProgram program;
 	const char *shaderStrings[1];
+	EProfile profile = ECoreProfile;
+	int defaultVersion = 450;
 	TBuiltInResource Resources;
 	init_resources(Resources);
 
@@ -1047,7 +1054,7 @@ bool GLSLtoSPV(const VkShaderStageFlagBits shader_type,
 	shaderStrings[0] = pshader;
 	shader.setStrings(shaderStrings, 1);
 
-	if (!shader.parse(&Resources, 100, false, messages)) {
+	if (!shader.parse(&Resources, defaultVersion, profile, false, true, messages)) {
 		puts(shader.getInfoLog());
 		puts(shader.getInfoDebugLog());
 		if (errorMessage) {
@@ -1071,7 +1078,11 @@ bool GLSLtoSPV(const VkShaderStageFlagBits shader_type,
 	}
 
 	// Can't fail, parsing worked, "linking" worked.
-	glslang::GlslangToSpv(*program.getIntermediate(stage), spirv);
+	glslang::SpvOptions options;
+	options.disableOptimizer = false;
+	options.optimizeSize = false;
+	options.generateDebugInfo = false;
+	glslang::GlslangToSpv(*program.getIntermediate(stage), spirv, &options);
 	return true;
 }
 

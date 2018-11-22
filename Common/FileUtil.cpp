@@ -24,6 +24,7 @@
 
 #include "ppsspp_config.h"
 
+#include <memory>
 #include "FileUtil.h"
 #include "StringUtils.h"
 
@@ -100,6 +101,69 @@ bool OpenCPPFile(std::fstream & stream, const std::string &filename, std::ios::o
 	return stream.is_open();
 }
 
+std::string ResolvePath(const std::string &path) {
+#ifdef _WIN32
+	typedef DWORD (WINAPI *getFinalPathNameByHandleW_f)(HANDLE hFile, LPWSTR lpszFilePath, DWORD cchFilePath, DWORD dwFlags);
+	static getFinalPathNameByHandleW_f getFinalPathNameByHandleW = nullptr;
+
+#if PPSSPP_PLATFORM(UWP)
+	getFinalPathNameByHandleW = &GetFinalPathNameByHandleW;
+#else
+	if (!getFinalPathNameByHandleW) {
+		HMODULE kernel32 = GetModuleHandle(L"kernel32.dll");
+		getFinalPathNameByHandleW = (getFinalPathNameByHandleW_f)GetProcAddress(kernel32, "GetFinalPathNameByHandleW");
+	}
+#endif
+
+	static const int BUF_SIZE = 32768;
+	wchar_t *buf = new wchar_t[BUF_SIZE];
+	memset(buf, 0, BUF_SIZE);
+
+	std::wstring input = ConvertUTF8ToWString(path);
+	if (getFinalPathNameByHandleW) {
+		HANDLE hFile = CreateFile(input.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+		if (hFile == INVALID_HANDLE_VALUE) {
+			wcscpy_s(buf, BUF_SIZE - 1, input.c_str());
+		} else {
+			int result = getFinalPathNameByHandleW(hFile, buf, BUF_SIZE - 1, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+			if (result >= BUF_SIZE || result == 0)
+				wcscpy_s(buf, BUF_SIZE - 1, input.c_str());
+		}
+	} else {
+		wchar_t *longBuf = new wchar_t[BUF_SIZE];
+		memset(buf, 0, BUF_SIZE);
+
+		int result = GetLongPathNameW(input.c_str(), longBuf, BUF_SIZE - 1);
+		if (result >= BUF_SIZE || result == 0)
+			wcscpy_s(longBuf, BUF_SIZE - 1, input.c_str());
+
+		result = GetFullPathNameW(longBuf, BUF_SIZE - 1, buf, nullptr);
+		if (result >= BUF_SIZE || result == 0)
+			wcscpy_s(buf, BUF_SIZE - 1, input.c_str());
+
+		delete [] longBuf;
+
+		// Normalize slashes just in case.
+		for (int i = 0; i < BUF_SIZE; ++i) {
+			if (buf[i] == '\\')
+				buf[i] = '/';
+		}
+	}
+
+	// Undo the \\?\C:\ syntax that's normally returned.
+	std::string output = ConvertWStringToUTF8(buf);
+	if (buf[0] == '\\' && buf[1] == '\\' && buf[2] == '?' && buf[3] == '\\' && isalpha(buf[4]) && buf[5] == ':')
+		output = output.substr(4);
+	delete [] buf;
+	return output;
+
+#else
+	std::unique_ptr<char[]> buf(new char[PATH_MAX + 32768]);
+	if (realpath(path.c_str(), buf.get()) == nullptr)
+		return path;
+	return buf.get();
+#endif
+}
 
 // Remove any ending forward slashes from directory paths
 // Modifies argument.
@@ -208,9 +272,11 @@ bool Delete(const std::string &filename) {
 // Returns true if successful, or path already exists.
 bool CreateDir(const std::string &path)
 {
-	DEBUG_LOG(COMMON, "CreateDir('%s')", path.c_str());
+	std::string fn = path;
+	StripTailDirSlashes(fn);
+	DEBUG_LOG(COMMON, "CreateDir('%s')", fn.c_str());
 #ifdef _WIN32
-	if (::CreateDirectory(ConvertUTF8ToWString(path).c_str(), NULL))
+	if (::CreateDirectory(ConvertUTF8ToWString(fn).c_str(), NULL))
 		return true;
 	DWORD error = GetLastError();
 	if (error == ERROR_ALREADY_EXISTS)
@@ -221,25 +287,27 @@ bool CreateDir(const std::string &path)
 	ERROR_LOG(COMMON, "CreateDir: CreateDirectory failed on %s: %i", path.c_str(), error);
 	return false;
 #else
-	if (mkdir(path.c_str(), 0755) == 0)
+	if (mkdir(fn.c_str(), 0755) == 0)
 		return true;
 
 	int err = errno;
 
 	if (err == EEXIST)
 	{
-		WARN_LOG(COMMON, "CreateDir: mkdir failed on %s: already exists", path.c_str());
+		WARN_LOG(COMMON, "CreateDir: mkdir failed on %s: already exists", fn.c_str());
 		return true;
 	}
 
-	ERROR_LOG(COMMON, "CreateDir: mkdir failed on %s: %s", path.c_str(), strerror(err));
+	ERROR_LOG(COMMON, "CreateDir: mkdir failed on %s: %s", fn.c_str(), strerror(err));
 	return false;
 #endif
 }
 
 // Creates the full path of fullPath returns true on success
-bool CreateFullPath(const std::string &fullPath)
+bool CreateFullPath(const std::string &path)
 {
+	std::string fullPath = path;
+	StripTailDirSlashes(fullPath);
 	int panicCounter = 100;
 	VERBOSE_LOG(COMMON, "CreateFullPath: path %s", fullPath.c_str());
 		
@@ -268,7 +336,7 @@ bool CreateFullPath(const std::string &fullPath)
 			return true;
 		}
 		std::string subPath = fullPath.substr(0, position);
-		if (!File::Exists(subPath))
+		if (position != 0 && !File::Exists(subPath))
 			File::CreateDir(subPath);
 
 		// A safety check

@@ -8,12 +8,14 @@
 #include "base/timeutil.h"
 #include "Common/ChunkFile.h"
 #include "Core/Config.h"
+#include "Core/ConfigValues.h"
 #include "Core/Core.h"
 #include "Core/HLE/sceCtrl.h"
 #include "Core/HLE/sceUtility.h"
 #include "Core/HLE/__sceAudio.h"
 #include "Core/HW/MemoryStick.h"
 #include "Core/Host.h"
+#include "Core/MemMap.h"
 #include "Core/System.h"
 #include "Log.h"
 #include "LogManager.h"
@@ -168,6 +170,7 @@ static RetroOption<int> ppsspp_rendering_mode("ppsspp_rendering_mode", "Renderin
 static RetroOption<bool> ppsspp_true_color("ppsspp_true_color", "True Color Depth", true);
 static RetroOption<bool> ppsspp_auto_frameskip("ppsspp_auto_frameskip", "Auto Frameskip", false);
 static RetroOption<int> ppsspp_frameskip("ppsspp_frameskip", "Frameskip", 0, 10);
+static RetroOption<int> ppsspp_frameskiptype("ppsspp_frameskiptype", "Frameskip Type", 0, 10);
 static RetroOption<int> ppsspp_force_max_fps("ppsspp_force_max_fps", "Force Max FPS", { { "disabled", 0 }, { "enabled", 60 } });
 static RetroOption<int> ppsspp_audio_latency("ppsspp_audio_latency", "Audio latency", { "low", "medium", "high" });
 static RetroOption<int> ppsspp_internal_resolution("ppsspp_internal_resolution", "Internal Resolution", 1, { "480x272", "960x544", "1440x816", "1920x1088", "2400x1360", "2880x1632", "3360x1904", "3840x2176", "4320x2448", "4800x2720" });
@@ -176,8 +179,10 @@ static RetroOption<bool> ppsspp_fast_memory("ppsspp_fast_memory", "Fast Memory (
 static RetroOption<bool> ppsspp_block_transfer_gpu("ppsspp_block_transfer_gpu", "Block Transfer GPU", true);
 static RetroOption<int> ppsspp_texture_scaling_level("ppsspp_texture_scaling_level", "Texture Scaling Level", { { "1", 1 }, { "2", 2 }, { "3", 3 }, { "4", 4 }, { "5", 5 }, { "0", 0 } });
 static RetroOption<int> ppsspp_texture_scaling_type("ppsspp_texture_scaling_type", "Texture Scaling Type", { { "xbrz", TextureScalerCommon::XBRZ }, { "hybrid", TextureScalerCommon::HYBRID }, { "bicubic", TextureScalerCommon::BICUBIC }, { "hybrid_bicubic", TextureScalerCommon::HYBRID_BICUBIC } });
+static RetroOption<int> ppsspp_texture_filtering("ppsspp_texture_filtering", "Texture Filtering", { { "auto", 1 }, { "nearest", 2 }, { "linear", 3 }, { "linear(FMV)", 4 } });
 static RetroOption<int> ppsspp_texture_anisotropic_filtering("ppsspp_texture_anisotropic_filtering", "Anisotropic Filtering", { "off", "1x", "2x", "4x", "8x", "16x" });
 static RetroOption<bool> ppsspp_texture_deposterize("ppsspp_texture_deposterize", "Texture Deposterize", false);
+static RetroOption<bool> ppsspp_texture_replacement("ppsspp_texture_replacement", "Texture Replacement", false);
 static RetroOption<bool> ppsspp_gpu_hardware_transform("ppsspp_gpu_hardware_transform", "GPU Hardware T&L", true);
 static RetroOption<bool> ppsspp_vertex_cache("ppsspp_vertex_cache", "Vertex Cache (Speedhack)", true);
 static RetroOption<bool> ppsspp_separate_io_thread("ppsspp_separate_io_thread", "IO Threading", false);
@@ -194,6 +199,7 @@ void retro_set_environment(retro_environment_t cb) {
 	vars.push_back(ppsspp_true_color.GetOptions());
 	vars.push_back(ppsspp_auto_frameskip.GetOptions());
 	vars.push_back(ppsspp_frameskip.GetOptions());
+	vars.push_back(ppsspp_frameskiptype.GetOptions());
 	vars.push_back(ppsspp_force_max_fps.GetOptions());
 	vars.push_back(ppsspp_audio_latency.GetOptions());
 	vars.push_back(ppsspp_internal_resolution.GetOptions());
@@ -202,8 +208,10 @@ void retro_set_environment(retro_environment_t cb) {
 	vars.push_back(ppsspp_block_transfer_gpu.GetOptions());
 	vars.push_back(ppsspp_texture_scaling_level.GetOptions());
 	vars.push_back(ppsspp_texture_scaling_type.GetOptions());
+	vars.push_back(ppsspp_texture_filtering.GetOptions());
 	vars.push_back(ppsspp_texture_anisotropic_filtering.GetOptions());
 	vars.push_back(ppsspp_texture_deposterize.GetOptions());
+	vars.push_back(ppsspp_texture_replacement.GetOptions());
 	vars.push_back(ppsspp_gpu_hardware_transform.GetOptions());
 	vars.push_back(ppsspp_vertex_cache.GetOptions());
 	vars.push_back(ppsspp_separate_io_thread.GetOptions());
@@ -262,12 +270,15 @@ static void check_variables(CoreParameter &coreParam) {
 	ppsspp_vertex_cache.Update(&g_Config.bVertexCache);
 	ppsspp_gpu_hardware_transform.Update(&g_Config.bHardwareTransform);
 	ppsspp_frameskip.Update(&g_Config.iFrameSkip);
+	ppsspp_frameskiptype.Update(&g_Config.iFrameSkipType);
 	ppsspp_audio_latency.Update(&g_Config.iAudioLatency);
 	ppsspp_true_color.Update(&g_Config.bTrueColor);
 	ppsspp_auto_frameskip.Update(&g_Config.bAutoFrameSkip);
 	ppsspp_block_transfer_gpu.Update(&g_Config.bBlockTransferGPU);
+	ppsspp_texture_filtering.Update(&g_Config.iTexFiltering);
 	ppsspp_texture_anisotropic_filtering.Update(&g_Config.iAnisotropyLevel);
 	ppsspp_texture_deposterize.Update(&g_Config.bTexDeposterize);
+	ppsspp_texture_replacement.Update(&g_Config.bReplaceTextures);
 	ppsspp_separate_io_thread.Update(&g_Config.bSeparateIOThread);
 	ppsspp_unsafe_func_replacements.Update(&g_Config.bFuncReplacements);
 	ppsspp_sound_speedhack.Update(&g_Config.bSoundSpeedHack);
@@ -549,7 +560,7 @@ bool retro_load_game(const struct retro_game_info *game) {
 	coreParam.enableSound = true;
 	coreParam.fileToStart = std::string(game->path);
 	coreParam.mountIso = "";
-	coreParam.startPaused = false;
+	coreParam.startBreak = false;
 	coreParam.printfEmuLog = true;
 	coreParam.headLess = true;
 	coreParam.unthrottle = true;
@@ -713,12 +724,16 @@ bool retro_unserialize(const void *data, size_t size) {
 }
 
 void *retro_get_memory_data(unsigned id) {
-	(void)id;
+	if ( id == RETRO_MEMORY_SYSTEM_RAM ) {
+		return Memory::GetPointerUnchecked(PSP_GetKernelMemoryBase()) ;
+	}
 	return NULL;
 }
 
 size_t retro_get_memory_size(unsigned id) {
-	(void)id;
+	if ( id == RETRO_MEMORY_SYSTEM_RAM ) {
+		return Memory::g_MemorySize ;
+	}
 	return 0;
 }
 

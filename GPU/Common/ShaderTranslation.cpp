@@ -242,7 +242,16 @@ bool TranslateShader(std::string *dest, ShaderLanguage destLang, TranslatedShade
 
 	std::vector<unsigned int> spirv;
 	// Can't fail, parsing worked, "linking" worked.
-	glslang::GlslangToSpv(*program.getIntermediate(shaderStage), spirv);
+	glslang::SpvOptions options;
+	options.disableOptimizer = false;
+	options.optimizeSize = false;
+	options.generateDebugInfo = false;
+	glslang::GlslangToSpv(*program.getIntermediate(shaderStage), spirv, &options);
+
+	// For whatever reason, with our config, the above outputs an invalid SPIR-V version, 0.
+	// Patch it up so spirv-cross accepts it.
+	spirv[1] = glslang::EShTargetSpv_1_0;
+
 
 	// Alright, step 1 done. Now let's take this SPIR-V shader and output in our desired format.
 
@@ -252,9 +261,11 @@ bool TranslateShader(std::string *dest, ShaderLanguage destLang, TranslatedShade
 	{
 		spirv_cross::CompilerHLSL hlsl(spirv);
 		spirv_cross::CompilerHLSL::Options options{};
-		options.fixup_clipspace = true;
 		options.shader_model = 30;
-		hlsl.set_options(options);
+		spirv_cross::CompilerGLSL::Options options_common{};
+		options_common.vertex.fixup_clipspace = true;
+		hlsl.set_hlsl_options(options);
+		hlsl.set_common_options(options_common);
 		*dest = hlsl.compile();
 		return true;
 	}
@@ -270,9 +281,11 @@ bool TranslateShader(std::string *dest, ShaderLanguage destLang, TranslatedShade
 			i++;
 		}
 		spirv_cross::CompilerHLSL::Options options{};
-		options.fixup_clipspace = true;
 		options.shader_model = 50;
-		hlsl.set_options(options);
+		spirv_cross::CompilerGLSL::Options options_common{};
+		options_common.vertex.fixup_clipspace = true;
+		hlsl.set_hlsl_options(options);
+		hlsl.set_common_options(options_common);
 		std::string raw = hlsl.compile();
 		*dest = Postprocess(raw, destLang, stage);
 		return true;
@@ -297,7 +310,7 @@ bool TranslateShader(std::string *dest, ShaderLanguage destLang, TranslatedShade
 		spirv_cross::CompilerGLSL::Options options;
 		options.version = 140;
 		options.es = true;
-		glsl.set_options(options);
+		glsl.set_common_options(options);
 
 		// Compile to GLSL, ready to give to GL driver.
 		*dest = glsl.compile();
@@ -310,12 +323,8 @@ bool TranslateShader(std::string *dest, ShaderLanguage destLang, TranslatedShade
 		spirv_cross::ShaderResources resources = glsl.get_shader_resources();
 		// Set some options.
 		spirv_cross::CompilerGLSL::Options options;
-		if (gl_extensions.ver[0] >= 4) {
-			options.version = 400;
-		} else {
-			options.version = 300;
-		}
-		glsl.set_options(options);
+		options.version = gl_extensions.GLSLVersion();
+		glsl.set_common_options(options);
 		// Compile to GLSL, ready to give to GL driver.
 		*dest = glsl.compile();
 		return true;
