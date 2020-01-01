@@ -30,8 +30,6 @@ static const float by32768 = 1.0f / 32768.0f;
 
 #ifdef MIPS
 using namespace MIPSGen;
-#else
-using namespace FakeGen;
 #endif
 
 static const JitLookup jitLookup[] = {
